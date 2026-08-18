@@ -1,4 +1,4 @@
 fastapi[standard]
 openpyxl
 python-multipart
-playwright
+playwright==1.61.0
