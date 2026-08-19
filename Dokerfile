@@ -2,11 +2,15 @@ FROM python:3.12-bookworm
 
 WORKDIR /app
 
+ENV PLAYWRIGHT_BROWSERS_PATH=/playwright-browsers
+
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN playwright install --with-deps chromium
+RUN mkdir -p /playwright-browsers \
+    && playwright install --with-deps chromium \
+    && ls -la /playwright-browsers
 
 COPY . .
 
