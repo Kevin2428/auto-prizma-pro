@@ -22,7 +22,7 @@ URL_PRIZMA = "https://admin.prizma.site/inicio-sesion"
 
 VERSION_SCRIPT = "PRUEBA_H5P_NUEVO_GESTION_FINANCIERA_V2"
 
-BUILD_INTERNO = "INTERFAZ_WEB_CURSO_COMPLETO_01"
+BUILD_INTERNO = "INTERFAZ_WEB_LOGIN_AUTOMATICO_02"
 
 
 TEXTOS_DESCRIPCION_A_BORRAR = [
@@ -2169,6 +2169,172 @@ def esperar_patch(
 
 
 # ============================================================
+# LOGIN AUTOMÁTICO
+# ============================================================
+
+def iniciar_sesion_prizma(
+    pagina,
+    usuario_prizma,
+    contrasena_prizma,
+):
+
+    print()
+    print("--------------------------------------")
+    print("LOGIN AUTOMÁTICO PRIZMA")
+    print("--------------------------------------")
+
+    pagina.goto(
+        URL_PRIZMA,
+        wait_until="domcontentloaded",
+        timeout=60000,
+    )
+
+    campo_usuario = pagina.locator(
+        'input[name="identification_number"]'
+    )
+
+    campo_contrasena = pagina.locator(
+        'input[name="password"]'
+    )
+
+    boton_login = pagina.get_by_role(
+        "button",
+        name="Iniciar sesión",
+        exact=True,
+    )
+
+    campo_usuario.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    campo_contrasena.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    boton_login.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    print(
+        "✅ Formulario de login detectado."
+    )
+
+    campo_usuario.fill(
+        usuario_prizma
+    )
+
+    campo_contrasena.fill(
+        contrasena_prizma
+    )
+
+    print(
+        "✅ Credenciales introducidas."
+    )
+
+    print(
+        "Iniciando sesión..."
+    )
+
+    boton_login.click(
+        timeout=10000
+    )
+
+    # --------------------------------------------------------
+    # CONFIRMAR PANEL
+    # --------------------------------------------------------
+
+    bienvenida = pagina.get_by_text(
+        "Bienvenido a Prizma admin",
+        exact=False,
+    )
+
+    try:
+
+        bienvenida.wait_for(
+            state="visible",
+            timeout=60000,
+        )
+
+    except Exception:
+
+        try:
+
+            texto_visible = pagina.locator(
+                "body"
+            ).inner_text()
+
+            print()
+            print(
+                "No se pudo confirmar el panel."
+            )
+
+            print(
+                texto_visible[:1200]
+            )
+
+        except Exception:
+            pass
+
+        raise RuntimeError(
+            "ERROR_LOGIN_PRIZMA"
+        )
+
+    print(
+        "✅ Login automático confirmado."
+    )
+
+    print(
+        "URL después del login:",
+        pagina.url,
+    )
+
+    # --------------------------------------------------------
+    # ENTRAR A ACTIVIDADES
+    # --------------------------------------------------------
+
+    tarjeta_actividades = pagina.get_by_role(
+        "button"
+    ).filter(
+        has_text="Actividades"
+    ).first
+
+    tarjeta_actividades.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    print(
+        "✅ Tarjeta Actividades detectada."
+    )
+
+    tarjeta_actividades.click(
+        timeout=10000
+    )
+
+    # --------------------------------------------------------
+    # CONFIRMAR LISTADO
+    # --------------------------------------------------------
+
+    buscador = pagina.locator(
+        'input[placeholder="Buscar..."]'
+    )
+
+    buscador.wait_for(
+        state="visible",
+        timeout=60000,
+    )
+
+    print(
+        "✅ Módulo Actividades abierto."
+    )
+
+    return True
+
+
+# ============================================================
 # PROCESAR ACTIVIDAD
 # ============================================================
 
@@ -2539,6 +2705,8 @@ def ejecutar_cargue(
     ruta_reporte,
     procesar_ovi,
     procesar_ova,
+    usuario_prizma,
+    contrasena_prizma,
     estado,
 ):
 
@@ -2566,6 +2734,14 @@ def ejecutar_cargue(
 
         print(
             "MODO = CURSO COMPLETO"
+        )
+
+        print(
+            "NAVEGADOR = HEADLESS"
+        )
+
+        print(
+            "LOGIN = AUTOMÁTICO"
         )
 
         print()
@@ -2632,10 +2808,6 @@ def ejecutar_cargue(
 
             return
 
-        # ====================================================
-        # AHORA SE PROCESAN TODAS
-        # ====================================================
-
         actividades_a_procesar = actividades
 
         print()
@@ -2648,7 +2820,7 @@ def ejecutar_cargue(
             estado,
             etapa="login",
             mensaje=(
-                "PRIZMA está esperando tu inicio de sesión."
+                "Iniciando sesión automáticamente en PRIZMA..."
             ),
             total=len(
                 actividades_a_procesar
@@ -2665,7 +2837,7 @@ def ejecutar_cargue(
         with sync_playwright() as p:
 
             navegador = p.chromium.launch(
-                headless=False
+                headless=True
             )
 
             pagina = navegador.new_page(
@@ -2721,37 +2893,22 @@ def ejecutar_cargue(
             )
 
             # ------------------------------------------------
-            # LOGIN
+            # LOGIN AUTOMÁTICO
             # ------------------------------------------------
 
-            pagina.goto(
-                URL_PRIZMA
+            iniciar_sesion_prizma(
+                pagina,
+                usuario_prizma,
+                contrasena_prizma,
             )
 
-            print()
-            print(
-                "Esperando login manual..."
-            )
-
-            pagina.get_by_role(
-                "button",
-                name="Actividades",
-            ).wait_for(
-                state="visible",
-                timeout=120000,
-            )
-
-            print(
-                "✅ LOGIN DETECTADO."
-            )
-
-            pagina.get_by_role(
-                "button",
-                name="Actividades",
-            ).click()
-
-            pagina.wait_for_timeout(
-                1500
+            actualizar_estado(
+                estado,
+                etapa="procesando",
+                mensaje=(
+                    "Login correcto. "
+                    "Módulo Actividades abierto."
+                ),
             )
 
             exitosas = 0
@@ -2939,9 +3096,18 @@ def ejecutar_cargue(
             traceback.format_exc()
         )
 
+        mensaje_error = str(e)
+
+        if "ERROR_LOGIN_PRIZMA" in mensaje_error:
+
+            mensaje_error = (
+                "No fue posible iniciar sesión en PRIZMA. "
+                "Verifica el usuario y la contraseña."
+            )
+
         actualizar_estado(
             estado,
             etapa="error",
-            mensaje=str(e),
+            mensaje=mensaje_error,
             terminado=True,
         )

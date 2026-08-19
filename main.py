@@ -664,7 +664,56 @@ def generar_html(
             <form
                 action="/iniciar/{trabajo_id}"
                 method="post"
+                autocomplete="off"
             >
+
+                <div class="credenciales">
+
+                    <h3>
+                        Acceso a PRIZMA
+                    </h3>
+
+                    <p class="ayuda">
+                        Ingresa tus credenciales de PRIZMA.
+                        Se utilizan únicamente durante
+                        esta ejecución.
+                    </p>
+
+                    <div class="campo">
+
+                        <label for="usuario_prizma">
+                            Usuario PRIZMA
+                        </label>
+
+                        <input
+                            id="usuario_prizma"
+                            type="text"
+                            name="usuario_prizma"
+                            placeholder="Usuario"
+                            autocomplete="off"
+                            required
+                        >
+
+                    </div>
+
+                    <div class="campo">
+
+                        <label for="contrasena_prizma">
+                            Contraseña PRIZMA
+                        </label>
+
+                        <input
+                            id="contrasena_prizma"
+                            type="password"
+                            name="contrasena_prizma"
+                            placeholder="Contraseña"
+                            autocomplete="new-password"
+                            required
+                        >
+
+                    </div>
+
+                </div>
 
                 <button
                     class="verde"
@@ -752,12 +801,22 @@ def generar_html(
                 margin-bottom: 8px;
             }}
 
-            input[type=file] {{
+            input[type=file],
+            input[type=text],
+            input[type=password] {{
                 width: 100%;
                 padding: 13px;
                 border:
                     1px solid #d1d5db;
                 border-radius: 10px;
+                font-size: 15px;
+                background: white;
+            }}
+
+            input[type=text]:focus,
+            input[type=password]:focus {{
+                outline: 2px solid #c7d2fe;
+                border-color: #6366f1;
             }}
 
             .checks {{
@@ -804,6 +863,27 @@ def generar_html(
 
             .iniciar {{
                 border: 2px solid #16a34a;
+            }}
+
+            .credenciales {{
+                background: #f8fafc;
+                border: 1px solid #e5e7eb;
+                border-radius: 12px;
+                padding: 20px;
+                margin: 20px 0;
+            }}
+
+            .credenciales h3 {{
+                margin-top: 0;
+                margin-bottom: 8px;
+            }}
+
+            .ayuda {{
+                color: #6b7280;
+                font-size: 14px;
+                line-height: 1.5;
+                margin-top: 0;
+                margin-bottom: 20px;
             }}
 
             .error {{
@@ -1226,6 +1306,8 @@ async def analizar(
 def iniciar_trabajo(
     trabajo_id: str,
     background_tasks: BackgroundTasks,
+    usuario_prizma: str = Form(...),
+    contrasena_prizma: str = Form(...),
 ):
 
     trabajo = TRABAJOS.get(
@@ -1240,6 +1322,34 @@ def iniciar_trabajo(
             <a href="/">Volver</a>
             """,
             status_code=404,
+        )
+
+    usuario_prizma = (
+        usuario_prizma.strip()
+    )
+
+    if not usuario_prizma:
+
+        return HTMLResponse(
+            """
+            <h2>
+                Debes ingresar el usuario PRIZMA.
+            </h2>
+            <a href="/">Volver</a>
+            """,
+            status_code=400,
+        )
+
+    if not contrasena_prizma:
+
+        return HTMLResponse(
+            """
+            <h2>
+                Debes ingresar la contraseña PRIZMA.
+            </h2>
+            <a href="/">Volver</a>
+            """,
+            status_code=400,
         )
 
     if trabajo[
@@ -1263,11 +1373,20 @@ def iniciar_trabajo(
 
     trabajo[
         "mensaje"
-    ] = "Iniciando Playwright..."
+    ] = (
+        "Iniciando navegador y "
+        "autenticación PRIZMA..."
+    )
 
     trabajo[
         "terminado"
     ] = False
+
+    # ========================================================
+    # IMPORTANTE
+    # Las credenciales NO se agregan al diccionario TRABAJOS.
+    # Se pasan directamente a esta ejecución.
+    # ========================================================
 
     background_tasks.add_task(
         ejecutar_cargue,
@@ -1277,6 +1396,8 @@ def iniciar_trabajo(
         trabajo["ruta_reporte"],
         trabajo["procesar_ovi"],
         trabajo["procesar_ova"],
+        usuario_prizma,
+        contrasena_prizma,
         trabajo,
     )
 
