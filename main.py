@@ -27,6 +27,11 @@ import zipfile
 import csv
 import os
 import uuid
+import html
+import json
+import re
+import threading
+from datetime import datetime
 
 
 app = FastAPI(
@@ -52,15 +57,26 @@ TEMP_DIR = os.path.join(
     "temp",
 )
 
+DATA_DIR = os.environ.get(
+    "AUTO_PRIZMA_DATA_DIR",
+    os.path.join(BASE_DIR, "data"),
+)
+
 RESULTADOS_DIR = os.path.join(
-    BASE_DIR,
-    "resultados",
+    DATA_DIR,
+    "reportes",
+)
+
+HISTORIAL_PATH = os.path.join(
+    DATA_DIR,
+    "historial.json",
 )
 
 
 for carpeta in [
     UPLOADS_DIR,
     TEMP_DIR,
+    DATA_DIR,
     RESULTADOS_DIR,
 ]:
 
@@ -75,6 +91,118 @@ for carpeta in [
 # ============================================================
 
 TRABAJOS = {}
+HISTORIAL_LOCK = threading.Lock()
+
+
+def _sanitizar_parte_nombre(valor, limite=70):
+    texto = str(valor or "").strip()
+    texto = re.sub(r'[\\/:*?"<>|]+', "-", texto)
+    texto = re.sub(r"\s+", " ", texto).strip(" .-")
+    if not texto:
+        texto = "Sin nombre"
+    return texto[:limite].rstrip()
+
+
+def _cursos_desde_hojas(hojas):
+    cursos = []
+    vistos = set()
+
+    for hoja in hojas or []:
+        curso = str(hoja.get("curso") or "").strip() or "Curso sin nombre"
+        programa = str(hoja.get("programa") or "").strip() or "Programa sin nombre"
+        clave = (curso.casefold(), programa.casefold())
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        cursos.append({"curso": curso, "programa": programa})
+
+    return cursos
+
+
+def _nombre_reporte(cursos, trabajo_id):
+    fecha = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    if cursos:
+        curso = _sanitizar_parte_nombre(cursos[0]["curso"], 58)
+        programa = _sanitizar_parte_nombre(cursos[0]["programa"], 58)
+        extra = ""
+        if len(cursos) > 1:
+            extra = f"_y_{len(cursos) - 1}_curso_mas"
+        return f"{fecha} - {curso} - {programa}{extra} - {trabajo_id[:6]}.csv"
+
+    return f"{fecha} - resultado_prizma - {trabajo_id[:6]}.csv"
+
+
+def _cargar_historial():
+    if not os.path.isfile(HISTORIAL_PATH):
+        return []
+
+    try:
+        with open(HISTORIAL_PATH, "r", encoding="utf-8") as archivo:
+            datos = json.load(archivo)
+        return datos if isinstance(datos, list) else []
+    except Exception:
+        return []
+
+
+def _guardar_historial(registros):
+    temporal = HISTORIAL_PATH + ".tmp"
+    with open(temporal, "w", encoding="utf-8") as archivo:
+        json.dump(registros, archivo, ensure_ascii=False, indent=2)
+    os.replace(temporal, HISTORIAL_PATH)
+
+
+def _registrar_reporte_final(trabajo):
+    ruta_reporte = trabajo.get("ruta_reporte")
+    if not ruta_reporte or not os.path.isfile(ruta_reporte):
+        return
+
+    with HISTORIAL_LOCK:
+        registros = _cargar_historial()
+        trabajo_id = trabajo.get("id")
+
+        if any(r.get("id") == trabajo_id for r in registros):
+            trabajo["historial_registrado"] = True
+            return
+
+        fecha_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+        registros.append({
+            "id": trabajo_id,
+            "fecha_iso": fecha_iso,
+            "archivo_reporte": os.path.basename(ruta_reporte),
+            "cursos": trabajo.get("cursos", []),
+        })
+        _guardar_historial(registros)
+        trabajo["historial_registrado"] = True
+
+
+def ejecutar_cargue_con_historial(
+    ruta_excel,
+    ruta_zip,
+    carpeta_temp,
+    ruta_reporte,
+    procesar_ovi,
+    procesar_ova,
+    procesar_retos,
+    usuario_prizma,
+    contrasena_prizma,
+    trabajo,
+):
+    try:
+        ejecutar_cargue(
+            ruta_excel,
+            ruta_zip,
+            carpeta_temp,
+            ruta_reporte,
+            procesar_ovi,
+            procesar_ova,
+            procesar_retos,
+            usuario_prizma,
+            contrasena_prizma,
+            trabajo,
+        )
+    finally:
+        _registrar_reporte_final(trabajo)
 
 
 # ============================================================
@@ -455,744 +583,644 @@ def generar_html(
     trabajo_id=None,
 ):
 
-    bloque = ""
+    def e(valor):
+        return html.escape(
+            str(valor or "")
+        )
+
+    contenido = ""
 
     # ========================================================
-    # ERROR
+    # PANTALLA INICIAL
     # ========================================================
 
-    if error:
+    if resultado is None:
 
-        bloque = f"""
-        <div class="error">
+        bloque_error = ""
 
-            <strong>
-                ERROR
-            </strong>
+        if error:
+            bloque_error = f"""
+            <div class="alerta-error">
+                <div class="alerta-icono">!</div>
+                <div>
+                    <strong>No se pudo continuar</strong>
+                    <p>{e(error)}</p>
+                </div>
+            </div>
+            """
 
-            <p>
-                {error}
+        contenido = f"""
+        <section class="encabezado-pagina">
+            <div>
+                <h1>¡Bienvenido!</h1>
+                <p>Automatiza el cargue de actividades en PRIZMA de forma rápida y segura.</p>
+            </div>
+        </section>
+
+        {bloque_error}
+
+        <form
+            id="cargue-principal"
+            action="/analizar"
+            method="post"
+            enctype="multipart/form-data"
+            class="panel panel-principal"
+        >
+            <div class="titulo-seccion">
+                <span class="numero-seccion">1</span>
+                <div>
+                    <h2>Archivos</h2>
+                    <p>Selecciona la matriz y el paquete de recursos.</p>
+                </div>
+            </div>
+
+            <div class="grid-archivos">
+                <label class="tarjeta-archivo zona-drop" for="archivo-matriz" data-input="archivo-matriz">
+                    <div class="archivo-cabecera">
+                        <div class="archivo-icono verde" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M9 11l6 6M15 11l-6 6"/></svg>
+                        </div>
+                        <div>
+                            <strong>Archivo Excel o CSV</strong>
+                            <span>Formatos .xlsx y .csv · también puedes arrastrarlo aquí</span>
+                        </div>
+                    </div>
+                    <div class="selector-archivo">
+                        <span class="boton-selector">Seleccionar archivo</span>
+                        <span id="nombre-matriz" class="nombre-archivo">Ningún archivo seleccionado</span>
+                    </div>
+                    <input
+                        id="archivo-matriz"
+                        type="file"
+                        name="excel"
+                        accept=".xlsx,.csv"
+                        required
+                    >
+                </label>
+
+                <label class="tarjeta-archivo zona-drop" for="archivo-zip" data-input="archivo-zip">
+                    <div class="archivo-cabecera">
+                        <div class="archivo-icono morado" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M11 5h2M11 8h2M11 11h2M11 14h2"/></svg>
+                        </div>
+                        <div>
+                            <strong>ZIP de recursos</strong>
+                            <span>Archivos H5P y PDF · también puedes arrastrarlo aquí</span>
+                        </div>
+                    </div>
+                    <div class="selector-archivo">
+                        <span class="boton-selector">Seleccionar archivo</span>
+                        <span id="nombre-zip" class="nombre-archivo">Ningún archivo seleccionado</span>
+                    </div>
+                    <input
+                        id="archivo-zip"
+                        type="file"
+                        name="recursos"
+                        accept=".zip"
+                        required
+                    >
+                </label>
+            </div>
+
+            <div class="separador"></div>
+
+            <div class="titulo-seccion">
+                <span class="numero-seccion">2</span>
+                <div>
+                    <h2>Tipos de actividades</h2>
+                    <p>Selecciona qué actividades deseas procesar.</p>
+                </div>
+            </div>
+
+            <div class="grid-tipos">
+                <label class="tarjeta-tipo tipo-verde">
+                    <input type="checkbox" name="ovi" value="1" checked>
+                    <span class="check-personalizado">✓</span>
+                    <span class="tipo-icono icono-ovi" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z"/></svg>
+                    </span>
+                    <strong>OVI</strong>
+                    <small>Objetos Virtuales de Información</small>
+                </label>
+
+                <label class="tarjeta-tipo tipo-azul">
+                    <input type="checkbox" name="ova" value="1" checked>
+                    <span class="check-personalizado">✓</span>
+                    <span class="tipo-icono icono-ova" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><path d="m9 9 2 2 4-4"/></svg>
+                    </span>
+                    <strong>OVA</strong>
+                    <small>Objetos Virtuales de Aprendizaje</small>
+                </label>
+
+                <label class="tarjeta-tipo tipo-morado">
+                    <input type="checkbox" name="retos" value="1" checked>
+                    <span class="check-personalizado">✓</span>
+                    <span class="tipo-icono icono-reto" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M8 3h8v4a4 4 0 0 1-8 0z"/><path d="M8 5H4v2a4 4 0 0 0 4 4M16 5h4v2a4 4 0 0 1-4 4"/><path d="M12 11v5M8 21h8M10 16h4v5h-4z"/></svg>
+                    </span>
+                    <strong>Retos Evaluativos</strong>
+                    <small>Retos evaluativos en PDF</small>
+                </label>
+            </div>
+
+            <button class="boton-principal" type="submit">
+                <span>↗</span>
+                Analizar archivos
+            </button>
+
+            <p class="nota-seguridad">
+                Tus archivos se utilizan únicamente durante el proceso de cargue.
             </p>
+        </form>
 
-        </div>
+        <aside id="ayuda" class="panel panel-ayuda">
+            <h3>¿Cómo funciona?</h3>
+            <div class="paso"><b>1</b><span>Sube tu Excel o CSV con las actividades.</span></div>
+            <div class="paso"><b>2</b><span>Sube el ZIP con los recursos correspondientes.</span></div>
+            <div class="paso"><b>3</b><span>Selecciona los tipos de actividades.</span></div>
+            <div class="paso"><b>4</b><span>Analiza, revisa y luego inicia el cargue.</span></div>
+
+            <div class="ayuda-separador"></div>
+
+            <h3 class="titulo-consejos">Consejos</h3>
+            <p class="consejo">✓ Verifica que la matriz conserve el formato esperado.</p>
+            <p class="consejo">✓ El ZIP debe contener los H5P y PDF correspondientes.</p>
+            <p class="consejo">✓ Revisa el análisis antes de iniciar el cargue.</p>
+        </aside>
         """
 
     # ========================================================
-    # RESULTADO
+    # PANTALLA DE REVISIÓN
     # ========================================================
 
-    elif resultado:
-
-        hojas_html = ""
+    else:
 
         total_actividades = 0
+        total_ovi = 0
+        total_ova = 0
+        total_retos = 0
+        total_h5p = 0
+        total_pdf = 0
+        filas_html = ""
 
-        for hoja in resultado[
-            "hojas"
-        ]:
-
-            filas = ""
+        for hoja in resultado["hojas"]:
 
             total_actividades += len(
                 hoja["actividades"]
             )
+            total_ovi += hoja.get("ovi", 0)
+            total_ova += hoja.get("ova", 0)
+            total_retos += hoja.get("retos", 0)
+            total_h5p += hoja.get("h5p", 0)
+            total_pdf += hoja.get("pdf", 0)
 
-            for actividad in hoja[
-                "actividades"
-            ]:
+            for actividad in hoja["actividades"]:
 
-                filas += f"""
+                categoria = actividad["categoria"]
+                clase_categoria = {
+                    "OVI": "badge-verde",
+                    "OVA": "badge-azul",
+                    "CHALLENGE": "badge-morado",
+                }.get(categoria, "badge-gris")
+
+                etiqueta_categoria = (
+                    "RETO"
+                    if categoria == "CHALLENGE"
+                    else categoria
+                )
+
+                clase_tipo = (
+                    "badge-pdf"
+                    if actividad["tipo"] == "PDF"
+                    else "badge-h5p"
+                )
+
+                filas_html += f"""
                 <tr>
-
-                    <td>
-                        {actividad["fila"]}
-                    </td>
-
-                    <td>
-                        {actividad["semana"]}
-                    </td>
-
-                    <td>
-                        {actividad["unidad"]}
-                    </td>
-
-                    <td>
-                        {actividad["nombre"]}
-                    </td>
-
-                    <td>
-                        {actividad["categoria"]}
-                    </td>
-
-                    <td>
-                        {actividad["tipo"]}
-                    </td>
-
+                    <td>{e(actividad["semana"])}</td>
+                    <td>{e(actividad["unidad"])}</td>
+                    <td class="celda-actividad">{e(actividad["nombre"])}</td>
+                    <td><span class="badge {clase_categoria}">{e(etiqueta_categoria)}</span></td>
+                    <td><span class="badge {clase_tipo}">{e(actividad["tipo"])}</span></td>
                 </tr>
                 """
 
-            hojas_html += f"""
-            <div class="panel">
+        contenido = f"""
+        <section id="cargue-principal" class="encabezado-exito panel">
+            <div class="check-grande">✓</div>
+            <div>
+                <h1>Análisis completado</h1>
+                <p>{total_actividades} actividades listas para cargar</p>
+            </div>
+        </section>
 
-                <h2>
-                    {hoja["curso"]}
-                </h2>
+        <section class="resumen-grid">
+            <div class="resumen-card"><span>Actividades</span><strong>{total_actividades}</strong></div>
+            <div class="resumen-card verde"><span>OVI</span><strong>{total_ovi}</strong></div>
+            <div class="resumen-card azul"><span>OVA</span><strong>{total_ova}</strong></div>
+            <div class="resumen-card morado"><span>Retos</span><strong>{total_retos}</strong></div>
+            <div class="resumen-card violeta"><span>H5P</span><strong>{total_h5p}</strong></div>
+            <div class="resumen-card rojo"><span>PDF</span><strong>{total_pdf}</strong></div>
+        </section>
 
-                <div class="grid">
-
-                    <div class="dato">
-
-                        <span>
-                            Programa
-                        </span>
-
-                        <strong>
-                            {hoja["programa"]}
-                        </strong>
-
-                    </div>
-
-                    <div class="dato">
-
-                        <span>
-                            OVI
-                        </span>
-
-                        <strong>
-                            {hoja["ovi"]}
-                        </strong>
-
-                    </div>
-
-                    <div class="dato">
-
-                        <span>
-                            OVA
-                        </span>
-
-                        <strong>
-                            {hoja["ova"]}
-                        </strong>
-
-                    </div>
-
-                    <div class="dato">
-
-                        <span>
-                            Retos Evaluativos
-                        </span>
-
-                        <strong>
-                            {hoja["retos"]}
-                        </strong>
-
-                    </div>
-
-                    <div class="dato">
-
-                        <span>
-                            H5P
-                        </span>
-
-                        <strong>
-                            {hoja["h5p"]}
-                        </strong>
-
-                    </div>
-
-                    <div class="dato">
-
-                        <span>
-                            PDF
-                        </span>
-
-                        <strong>
-                            {hoja["pdf"]}
-                        </strong>
-
-                    </div>
-
+        <section class="revision-grid">
+            <div class="panel tabla-panel">
+                <div class="titulo-bloque">
+                    <h2>Actividades detectadas</h2>
+                    <p>Revisa que las actividades y categorías sean correctas.</p>
                 </div>
 
-                <h3>
-                    Actividades a procesar
-                </h3>
-
-                <div class="tabla">
-
+                <div class="tabla-scroll">
                     <table>
-
                         <thead>
-
                             <tr>
-
-                                <th>
-                                    Fila
-                                </th>
-
-                                <th>
-                                    Semana
-                                </th>
-
-                                <th>
-                                    Unidad
-                                </th>
-
-                                <th>
-                                    Actividad
-                                </th>
-
-                                <th>
-                                    Categoría
-                                </th>
-
-                                <th>
-                                    Tipo
-                                </th>
-
+                                <th>Semana</th>
+                                <th>Unidad</th>
+                                <th>Actividad</th>
+                                <th>Categoría</th>
+                                <th>Tipo</th>
                             </tr>
-
                         </thead>
-
                         <tbody>
-                            {filas}
+                            {filas_html}
                         </tbody>
-
                     </table>
-
                 </div>
-
-            </div>
-            """
-
-        zip_info = resultado[
-            "zip"
-        ]
-
-        bloque = f"""
-
-        <div class="panel correcto">
-
-            <h2>
-                ✅ Análisis completado
-            </h2>
-
-            <div class="grid">
-
-                <div class="dato">
-
-                    <span>
-                        Actividades a procesar
-                    </span>
-
-                    <strong>
-                        {total_actividades}
-                    </strong>
-
-                </div>
-
-                <div class="dato">
-
-                    <span>
-                        H5P en ZIP
-                    </span>
-
-                    <strong>
-                        {zip_info["h5p"]}
-                    </strong>
-
-                </div>
-
-                <div class="dato">
-
-                    <span>
-                        PDF en ZIP
-                    </span>
-
-                    <strong>
-                        {zip_info["pdf"]}
-                    </strong>
-
-                </div>
-
-                <div class="dato">
-
-                    <span>
-                        Total recursos
-                    </span>
-
-                    <strong>
-                        {zip_info["total"]}
-                    </strong>
-
-                </div>
-
             </div>
 
-        </div>
-
-        {hojas_html}
-
-        <div class="panel iniciar">
-
-            <h2>
-                Iniciar cargue
-            </h2>
-
-            <p>
-                Se procesarán las
-                <strong>
-                    {total_actividades}
-                    actividades compatibles
-                </strong>
-                mostradas arriba.
-            </p>
-
-            <div class="reglas">
-
-                <div>
-                    ✅ OVI, OVA y Retos Evaluativos
+            <div class="panel credenciales-panel">
+                <div class="titulo-bloque">
+                    <h2>Acceso a PRIZMA</h2>
+                    <p>Ingresa tus credenciales para autorizar este cargue.</p>
                 </div>
 
-                <div>
-                    ✅ OVI/OVA: H5P y PDF se cargan en Recurso
-                </div>
-
-                <div>
-                    ✅ Retos: PDF se carga en Contenido
-                </div>
-
-                <div>
-                    🚫 Material descargable no se toca
-                </div>
-
-                <div>
-                    🚫 Video Intro/Cierre excluidos
-                </div>
-
-                <div>
-                    ✅ Error individual no detiene el curso
-                </div>
-
-            </div>
-
-            <form
-                action="/iniciar/{trabajo_id}"
-                method="post"
-                autocomplete="off"
-            >
-
-                <div class="credenciales">
-
-                    <h3>
-                        Acceso a PRIZMA
-                    </h3>
-
-                    <p class="ayuda">
-                        Ingresa tus credenciales de PRIZMA.
-                        Se utilizan únicamente durante
-                        esta ejecución.
-                    </p>
-
-                    <div class="campo">
-
-                        <label for="usuario_prizma">
-                            Usuario PRIZMA
-                        </label>
-
+                <form action="/iniciar/{trabajo_id}" method="post" autocomplete="off">
+                    <label class="campo-label" for="usuario_prizma">Usuario PRIZMA</label>
+                    <div class="campo-moderno">
+                        <span>♙</span>
                         <input
                             id="usuario_prizma"
                             type="text"
                             name="usuario_prizma"
-                            placeholder="Usuario"
+                            placeholder="Ingresa tu usuario"
                             autocomplete="off"
                             required
                         >
-
                     </div>
 
-                    <div class="campo">
-
-                        <label for="contrasena_prizma">
-                            Contraseña PRIZMA
-                        </label>
-
+                    <label class="campo-label" for="contrasena_prizma">Contraseña PRIZMA</label>
+                    <div class="campo-moderno">
+                        <span>⌾</span>
                         <input
                             id="contrasena_prizma"
                             type="password"
                             name="contrasena_prizma"
-                            placeholder="Contraseña"
+                            placeholder="Ingresa tu contraseña"
                             autocomplete="new-password"
                             required
                         >
-
                     </div>
 
-                </div>
+                    <div class="caja-seguridad">
+                        <strong>Credenciales de uso temporal</strong>
+                        <span>La aplicación no las escribe en archivos, reportes ni base de datos.</span>
+                    </div>
 
-                <button
-                    class="verde"
-                    type="submit"
-                >
+                    <button class="boton-principal" type="submit">
+                        <span>↗</span>
+                        Iniciar cargue en PRIZMA
+                    </button>
+                </form>
+            </div>
+        </section>
 
-                    INICIAR CARGUE COMPLETO EN PRIZMA
-
-                </button>
-
-            </form>
-
-        </div>
-
+        <a class="boton-secundario" href="/">← Cambiar archivos</a>
         """
 
-    return f"""
+    return """
     <!DOCTYPE html>
-
     <html lang="es">
-
     <head>
-
         <meta charset="UTF-8">
-
-        <meta
-            name="viewport"
-            content="width=device-width,
-            initial-scale=1.0"
-        >
-
-        <title>
-            Auto Prizma Pro
-        </title>
-
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Auto Prizma Pro</title>
         <style>
+            :root {
+                --fondo: #f7f8fc;
+                --panel: #ffffff;
+                --texto: #101828;
+                --muted: #667085;
+                --borde: #e5e7ef;
+                --morado: #5b48e8;
+                --morado-2: #4338ca;
+                --verde: #0ea968;
+                --azul: #1976d2;
+                --rojo: #ef4444;
+                --sombra: 0 10px 30px rgba(29, 41, 57, .06);
+            }
 
-            * {{
-                box-sizing: border-box;
-            }}
+            * { box-sizing: border-box; }
 
-            body {{
+            body {
                 margin: 0;
-                background: #f4f6fb;
-                color: #1f2937;
-                font-family: Arial, sans-serif;
-            }}
+                font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                background: var(--fondo);
+                color: var(--texto);
+            }
 
-            .contenedor {{
-                width: 1100px;
-                max-width: calc(100% - 40px);
-                margin: 45px auto;
-            }}
+            .app { min-height: 100vh; display: grid; grid-template-columns: 235px 1fr; }
 
-            h1 {{
-                margin-bottom: 6px;
-            }}
-
-            .subtitulo {{
-                color: #6b7280;
-                margin-bottom: 30px;
-            }}
-
-            .panel {{
-                background: white;
-                padding: 28px;
-                margin-top: 25px;
-                border-radius: 16px;
-                box-shadow:
-                    0 8px 30px
-                    rgba(0,0,0,.06);
-            }}
-
-            .principal {{
-                margin-top: 0;
-            }}
-
-            .campo {{
-                margin-bottom: 22px;
-            }}
-
-            label {{
-                display: block;
-                font-weight: bold;
-                margin-bottom: 8px;
-            }}
-
-            input[type=file],
-            input[type=text],
-            input[type=password] {{
-                width: 100%;
-                padding: 13px;
-                border:
-                    1px solid #d1d5db;
-                border-radius: 10px;
-                font-size: 15px;
-                background: white;
-            }}
-
-            input[type=text]:focus,
-            input[type=password]:focus {{
-                outline: 2px solid #c7d2fe;
-                border-color: #6366f1;
-            }}
-
-            .checks {{
+            .sidebar {
+                position: sticky;
+                top: 0;
+                height: 100vh;
+                background: #fff;
+                border-right: 1px solid var(--borde);
+                padding: 28px 20px;
                 display: flex;
-                gap: 24px;
-                margin-bottom: 22px;
-            }}
+                flex-direction: column;
+            }
 
-            .checks label {{
-                display: inline;
-                font-weight: normal;
-            }}
+            .marca { display: flex; align-items: center; gap: 12px; margin-bottom: 34px; }
+            .logo {
+                width: 44px; height: 44px; border-radius: 13px;
+                display: grid; place-items: center;
+                background: linear-gradient(145deg, #6d5dfc, #4338ca);
+                box-shadow: 0 8px 20px rgba(79, 70, 229, .25);
+                flex: 0 0 44px;
+            }
+            .logo svg { width: 29px; height: 29px; overflow: visible; }
+            .logo svg path:first-child { fill: #fff; }
+            .logo svg path:last-child { fill: #c7d2fe; }
+            .marca strong { display: block; font-size: 18px; }
+            .marca span { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 
-            .aviso {{
-                padding: 14px;
-                border-radius: 10px;
-                background: #fff7ed;
-                margin-bottom: 22px;
-            }}
+            .nav { display: grid; gap: 8px; }
+            .nav-item {
+                padding: 12px 14px; border-radius: 11px; color: #475467; font-size: 14px;
+                display: flex; gap: 11px; align-items: center; text-decoration: none; transition: .18s ease;
+            }
+            a.nav-item:hover { background: #f7f5ff; color: #4f46e5; }
+            .nav-item.activo { background: #f1efff; color: #4f46e5; font-weight: 700; }
+            .nav-item.proximamente { opacity: .48; cursor: default; }
+            .nav-item.proximamente small { margin-left: auto; font-size: 9px; }
 
-            button {{
-                width: 100%;
-                padding: 15px;
-                border: 0;
-                border-radius: 10px;
-                background: #111827;
-                color: white;
-                font-size: 16px;
-                font-weight: bold;
-                cursor: pointer;
-            }}
+            .estado-servicio {
+                margin-top: auto; border: 1px solid var(--borde); border-radius: 14px;
+                padding: 15px; background: #fff;
+            }
+            .servicio-linea { display: flex; align-items: center; gap: 8px; color: #07894f; font-size: 13px; font-weight: 700; }
+            .punto { width: 8px; height: 8px; border-radius: 50%; background: #15b76a; }
+            .servicio-mini { margin-top: 13px; display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+            .chip { background: #eef4ff; color: #3538cd; padding: 4px 8px; border-radius: 999px; }
 
-            button:hover {{
-                opacity: .92;
-            }}
+            .contenido { padding: 28px 34px 45px; max-width: 1500px; width: 100%; margin: 0 auto; }
+            .layout-inicio { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 24px; align-items: start; }
 
-            .verde {{
-                background: #16a34a;
-            }}
+            .panel {
+                background: var(--panel); border: 1px solid var(--borde); border-radius: 16px;
+                box-shadow: var(--sombra);
+            }
 
-            .correcto {{
-                background: #ecfdf5;
-            }}
+            .encabezado-pagina {
+                grid-column: 1 / -1; background: #fff; border: 1px solid var(--borde);
+                border-radius: 16px; padding: 24px 28px; box-shadow: var(--sombra);
+            }
+            .encabezado-pagina h1, .encabezado-exito h1 { margin: 0; font-size: 25px; }
+            .encabezado-pagina p, .encabezado-exito p { margin: 6px 0 0; color: var(--muted); }
 
-            .iniciar {{
-                border: 2px solid #16a34a;
-            }}
+            .panel-principal { padding: 26px; }
+            .titulo-seccion { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 18px; }
+            .titulo-seccion h2, .titulo-bloque h2 { margin: 0; font-size: 18px; }
+            .titulo-seccion p, .titulo-bloque p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+            .numero-seccion {
+                width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center;
+                background: #f0edff; color: #5145cd; font-weight: 800; font-size: 13px;
+            }
 
-            .credenciales {{
-                background: #f8fafc;
-                border: 1px solid #e5e7eb;
-                border-radius: 12px;
-                padding: 20px;
-                margin: 20px 0;
-            }}
+            .grid-archivos { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+            .tarjeta-archivo {
+                border: 1px dashed #cfd4e1; border-radius: 14px; padding: 20px;
+                cursor: pointer; transition: .18s ease; background: #fff;
+                min-width: 0; overflow: hidden;
+            }
+            .tarjeta-archivo:hover { border-color: #8176f2; background: #fbfaff; transform: translateY(-1px); }
+            .tarjeta-archivo.arrastrando { border-color: #5b48e8; background: #f5f3ff; box-shadow: inset 0 0 0 2px rgba(91,72,232,.10); }
+            .tarjeta-archivo input { display: none; }
+            .archivo-cabecera { display: flex; align-items: center; gap: 12px; min-width: 0; }
+            .archivo-cabecera > div:last-child { min-width: 0; }
+            .archivo-cabecera strong { display: block; font-size: 14px; }
+            .archivo-cabecera span { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; }
+            .archivo-icono {
+                width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
+                flex: 0 0 40px;
+            }
+            .archivo-icono svg { width: 23px; height: 23px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+            .archivo-icono.verde { background: #e8f8f0; color: #0a9b5b; }
+            .archivo-icono.morado { background: #f0edff; color: #5b48e8; }
+            .selector-archivo {
+                margin-top: 18px; min-height: 46px; border: 1px solid var(--borde); border-radius: 10px;
+                padding: 9px 12px; display: flex; align-items: center; gap: 12px;
+                min-width: 0; overflow: hidden;
+            }
+            .boton-selector {
+                background: #5b48e8; color: #fff; padding: 8px 12px; border-radius: 8px;
+                font-size: 12px; font-weight: 700; white-space: nowrap;
+            }
+            .nombre-archivo { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; display: block; }
 
-            .credenciales h3 {{
-                margin-top: 0;
-                margin-bottom: 8px;
-            }}
+            .separador { height: 1px; background: var(--borde); margin: 26px 0; }
+            .grid-tipos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+            .tarjeta-tipo {
+                position: relative; border: 1px solid var(--borde); border-radius: 14px; padding: 18px;
+                min-height: 125px; cursor: pointer; transition: .18s ease; display: flex; flex-direction: column;
+            }
+            .tarjeta-tipo:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(16,24,40,.06); }
+            .tarjeta-tipo input { position: absolute; opacity: 0; pointer-events: none; }
+            .check-personalizado {
+                position: absolute; top: 15px; right: 15px; width: 22px; height: 22px;
+                border-radius: 6px; display: grid; place-items: center; color: white; font-size: 13px;
+                background: #d0d5dd;
+            }
+            .tarjeta-tipo:has(input:checked).tipo-verde { border-color: #65d6a1; background: #fbfffd; }
+            .tarjeta-tipo:has(input:checked).tipo-verde .check-personalizado { background: #0ea968; }
+            .tarjeta-tipo:has(input:checked).tipo-azul { border-color: #7ab6ef; background: #fbfdff; }
+            .tarjeta-tipo:has(input:checked).tipo-azul .check-personalizado { background: #1976d2; }
+            .tarjeta-tipo:has(input:checked).tipo-morado { border-color: #b9a8f5; background: #fdfcff; }
+            .tarjeta-tipo:has(input:checked).tipo-morado .check-personalizado { background: #8b5cf6; }
+            .tipo-icono { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 15px; }
+            .tipo-icono svg { width: 25px; height: 25px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+            .icono-ovi { color:#079455; background:#e9f9f1; }
+            .icono-ova { color:#1976d2; background:#eaf4ff; }
+            .icono-reto { color:#7f56d9; background:#f1ebff; }
+            .tarjeta-tipo strong { font-size: 16px; }
+            .tarjeta-tipo small { color: var(--muted); margin-top: 6px; line-height: 1.4; }
 
-            .ayuda {{
-                color: #6b7280;
-                font-size: 14px;
-                line-height: 1.5;
-                margin-top: 0;
-                margin-bottom: 20px;
-            }}
+            .boton-principal {
+                width: 100%; border: 0; border-radius: 11px; padding: 15px 20px; margin-top: 24px;
+                color: #fff; font-size: 15px; font-weight: 800; cursor: pointer;
+                background: linear-gradient(90deg, #5145e5, #4f46e5 55%, #5f45df);
+                box-shadow: 0 8px 20px rgba(79,70,229,.20);
+            }
+            .boton-principal:hover { filter: brightness(.98); transform: translateY(-1px); }
+            .boton-principal span { margin-right: 8px; }
+            .nota-seguridad { text-align: center; color: var(--muted); font-size: 12px; margin: 14px 0 0; }
 
-            .error {{
-                background: #fef2f2;
-                padding: 20px;
-                margin-top: 25px;
-                border-radius: 12px;
-            }}
+            .panel-ayuda { padding: 24px; }
+            .panel-ayuda h3 { margin: 0 0 20px; font-size: 17px; }
+            .paso { display: grid; grid-template-columns: 30px 1fr; gap: 12px; align-items: start; margin-bottom: 20px; color: #475467; font-size: 13px; line-height: 1.5; }
+            .paso b { width: 28px; height: 28px; border-radius: 50%; background: #f1efff; color: #4f46e5; display: grid; place-items: center; }
+            .ayuda-separador { height: 1px; background: var(--borde); margin: 24px 0; }
+            .titulo-consejos { color: #4f46e5; }
+            .consejo { color: #475467; font-size: 13px; line-height: 1.55; }
 
-            .grid {{
-                display: grid;
-                grid-template-columns:
-                    repeat(
-                        auto-fit,
-                        minmax(160px, 1fr)
-                    );
-                gap: 12px;
-                margin: 18px 0;
-            }}
+            .alerta-error {
+                grid-column: 1 / -1; display: flex; gap: 12px; padding: 16px 18px; border-radius: 12px;
+                background: #fff1f2; border: 1px solid #fecdd3; color: #9f1239;
+            }
+            .alerta-error p { margin: 4px 0 0; }
+            .alerta-icono { width: 28px; height: 28px; border-radius: 50%; background: #ef4444; color: #fff; display: grid; place-items: center; font-weight: 900; }
 
-            .dato {{
-                padding: 14px;
-                border:
-                    1px solid #e5e7eb;
-                border-radius: 10px;
-                background: #f8fafc;
-            }}
+            .encabezado-exito { padding: 22px 24px; display: flex; gap: 15px; align-items: center; margin-bottom: 0; grid-column: 1 / -1; }
+            .check-grande { width: 48px; height: 48px; border-radius: 14px; background: #e9f9f1; color: #08a45e; display: grid; place-items: center; font-size: 25px; font-weight: 900; }
+            .resumen-grid { display: grid; grid-template-columns: repeat(6, minmax(110px, 1fr)); gap: 14px; margin: 18px 0 20px; grid-column: 1 / -1; min-width: 0; }
+            .resumen-card { background: #fff; border: 1px solid var(--borde); border-radius: 14px; padding: 17px; box-shadow: var(--sombra); text-align: center; }
+            .resumen-card span { display: block; color: var(--muted); font-size: 12px; }
+            .resumen-card strong { display: block; font-size: 27px; margin-top: 6px; }
+            .resumen-card.verde strong { color: #0a9b5b; }
+            .resumen-card.azul strong { color: #1976d2; }
+            .resumen-card.morado strong, .resumen-card.violeta strong { color: #6d4ce8; }
+            .resumen-card.rojo strong { color: #e5484d; }
 
-            .dato span {{
-                display: block;
-                color: #6b7280;
-                font-size: 13px;
-                margin-bottom: 5px;
-            }}
+            .revision-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(310px, .75fr); gap: 20px; align-items: start; grid-column: 1 / -1; min-width: 0; }
+            .tabla-panel, .credenciales-panel { padding: 24px; }
+            .titulo-bloque { margin-bottom: 18px; }
+            .tabla-scroll { max-height: 570px; overflow: auto; border: 1px solid var(--borde); border-radius: 12px; }
+            table { width: 100%; border-collapse: collapse; font-size: 13px; }
+            thead { position: sticky; top: 0; background: #f8f9fc; z-index: 1; }
+            th { text-align: left; color: #475467; font-size: 12px; padding: 12px 13px; border-bottom: 1px solid var(--borde); }
+            td { padding: 12px 13px; border-bottom: 1px solid #eef0f4; vertical-align: middle; }
+            tbody tr:last-child td { border-bottom: 0; }
+            .celda-actividad { min-width: 260px; }
+            .badge { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 10px; font-weight: 800; }
+            .badge-verde { background: #e9f9f1; color: #07894f; }
+            .badge-azul { background: #eaf4ff; color: #1565c0; }
+            .badge-morado { background: #f1ebff; color: #7048d7; }
+            .badge-gris { background: #f2f4f7; color: #475467; }
+            .badge-h5p { background: #f1ebff; color: #6941c6; }
+            .badge-pdf { background: #fff0f1; color: #d92d20; }
 
-            .tabla {{
-                overflow-x: auto;
-            }}
+            .campo-label { display: block; font-size: 13px; font-weight: 700; margin: 18px 0 8px; }
+            .campo-moderno { display: flex; align-items: center; gap: 10px; border: 1px solid #d7dbe5; border-radius: 10px; padding: 0 12px; background: #fff; }
+            .campo-moderno span { color: #667085; }
+            .campo-moderno input { width: 100%; border: 0; outline: 0; padding: 13px 0; font-size: 14px; background: transparent; }
+            .caja-seguridad { margin-top: 20px; background: #f8f7ff; border: 1px solid #d9d4ff; border-radius: 11px; padding: 14px; }
+            .caja-seguridad strong, .caja-seguridad span { display: block; }
+            .caja-seguridad strong { font-size: 12px; color: #4f46e5; }
+            .caja-seguridad span { font-size: 12px; color: var(--muted); margin-top: 5px; line-height: 1.45; }
+            .boton-secundario { grid-column: 1 / -1; display: inline-block; margin-top: 20px; color: #4f46e5; text-decoration: none; font-weight: 700; font-size: 14px; padding: 11px 15px; border: 1px solid #d8d6f8; border-radius: 10px; background: #fff; }
 
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-            }}
+            @media (max-width: 1050px) {
+                .app { grid-template-columns: 1fr; }
+                .sidebar { display: none; }
+                .contenido { padding: 20px; }
+                .layout-inicio { grid-template-columns: 1fr; }
+                .panel-ayuda { order: 2; }
+                .resumen-grid { grid-template-columns: repeat(3, 1fr); }
+                .revision-grid { grid-template-columns: 1fr; }
+            }
 
-            th {{
-                text-align: left;
-                background: #f3f4f6;
-                padding: 11px;
-            }}
-
-            td {{
-                padding: 11px;
-                border-bottom:
-                    1px solid #e5e7eb;
-            }}
-
-            .reglas {{
-                background: #f8fafc;
-                border-radius: 10px;
-                padding: 15px;
-                margin: 20px 0;
-                line-height: 1.9;
-            }}
-
+            @media (max-width: 700px) {
+                .grid-archivos, .grid-tipos { grid-template-columns: 1fr; }
+                .resumen-grid { grid-template-columns: repeat(2, 1fr); }
+                .contenido { padding: 14px; }
+                .panel-principal, .tabla-panel, .credenciales-panel { padding: 18px; }
+            }
         </style>
-
     </head>
-
     <body>
-
-        <div class="contenedor">
-
-            <h1>
-                Auto Prizma Pro
-            </h1>
-
-            <div class="subtitulo">
-                Automatización de cargue
-                de actividades PRIZMA
-            </div>
-
-            <div class="panel principal">
-
-                <form
-                    action="/analizar"
-                    method="post"
-                    enctype="multipart/form-data"
-                >
-
-                    <div class="campo">
-
-                        <label>
-                            Matriz de actividades
-                        </label>
-
-                        <input
-                            type="file"
-                            name="excel"
-                            accept=".xlsx,.csv"
-                            required
-                        >
-
+        <div class="app">
+            <aside class="sidebar">
+                <div class="marca">
+                    <div class="logo" aria-label="Auto Prizma Pro">
+                        <svg viewBox="0 0 48 48" aria-hidden="true">
+                            <path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/>
+                            <path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/>
+                        </svg>
                     </div>
-
-                    <div class="campo">
-
-                        <label>
-                            ZIP de recursos
-                        </label>
-
-                        <input
-                            type="file"
-                            name="recursos"
-                            accept=".zip"
-                            required
-                        >
-
+                    <div>
+                        <strong>Auto Prizma Pro</strong>
+                        <span>Automatización PRIZMA</span>
                     </div>
+                </div>
 
-                    <div class="checks">
+                <nav class="nav">
+                    <a class="nav-item activo" href="/">⌂ <span>Inicio</span></a>
+                    <a class="nav-item" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
+                    <a class="nav-item" href="/historial">◷ <span>Historial</span></a>
+                    <a class="nav-item" href="/reportes">▥ <span>Reportes</span></a>
+                </nav>
 
-                        <div>
+                <div class="estado-servicio">
+                    <div class="servicio-linea"><span class="punto"></span> Servicio activo</div>
+                    <div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div>
+                    <div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div>
+                </div>
+            </aside>
 
-                            <input
-                                id="ovi"
-                                type="checkbox"
-                                name="ovi"
-                                value="1"
-                                checked
-                            >
-
-                            <label for="ovi">
-                                OVI
-                            </label>
-
-                        </div>
-
-                        <div>
-
-                            <input
-                                id="ova"
-                                type="checkbox"
-                                name="ova"
-                                value="1"
-                                checked
-                            >
-
-                            <label for="ova">
-                                OVA
-                            </label>
-
-                        </div>
-
-                        <div>
-
-                            <input
-                                id="retos"
-                                type="checkbox"
-                                name="retos"
-                                value="1"
-                                checked
-                            >
-
-                            <label for="retos">
-                                Retos Evaluativos
-                            </label>
-
-                        </div>
-
-                    </div>
-
-                    <div class="aviso">
-
-                        Video Intro y Video Cierre
-                        continúan excluidos.
-
-                    </div>
-
-                    <button type="submit">
-
-                        Analizar archivos
-
-                    </button>
-
-                </form>
-
-            </div>
-
-            {bloque}
-
+            <main class="contenido">
+                <div class="layout-inicio">
+                    """ + contenido + """
+                </div>
+            </main>
         </div>
 
-    </body>
+        <script>
+            const matriz = document.getElementById('archivo-matriz');
+            const zip = document.getElementById('archivo-zip');
 
+            function actualizarNombre(input, destinoId) {
+                const destino = document.getElementById(destinoId);
+                if (!destino || !input) return;
+                destino.textContent = input.files.length ? input.files[0].name : 'Ningún archivo seleccionado';
+                destino.title = input.files.length ? input.files[0].name : '';
+            }
+
+            if (matriz) matriz.addEventListener('change', () => actualizarNombre(matriz, 'nombre-matriz'));
+            if (zip) zip.addEventListener('change', () => actualizarNombre(zip, 'nombre-zip'));
+
+            document.querySelectorAll('.zona-drop').forEach((zona) => {
+                const input = document.getElementById(zona.dataset.input);
+                if (!input) return;
+
+                ['dragenter', 'dragover'].forEach((evento) => {
+                    zona.addEventListener(evento, (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        zona.classList.add('arrastrando');
+                    });
+                });
+
+                ['dragleave', 'drop'].forEach((evento) => {
+                    zona.addEventListener(evento, (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        zona.classList.remove('arrastrando');
+                    });
+                });
+
+                zona.addEventListener('drop', (e) => {
+                    const archivos = e.dataTransfer.files;
+                    if (!archivos || !archivos.length) return;
+                    const transferencia = new DataTransfer();
+                    transferencia.items.add(archivos[0]);
+                    input.files = transferencia.files;
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                });
+            });
+        </script>
+    </body>
     </html>
     """
 
@@ -1379,9 +1407,11 @@ async def analizar(
             exist_ok=True,
         )
 
+        cursos_trabajo = _cursos_desde_hojas(hojas)
+
         ruta_reporte = os.path.join(
             RESULTADOS_DIR,
-            f"resultado_{trabajo_id}.csv",
+            _nombre_reporte(cursos_trabajo, trabajo_id),
         )
 
         TRABAJOS[
@@ -1434,6 +1464,12 @@ async def analizar(
 
             "detalle_actividades":
                 [],
+
+            "cursos":
+                cursos_trabajo,
+
+            "historial_registrado":
+                False,
         }
 
         resultado = {
@@ -1476,7 +1512,6 @@ def iniciar_trabajo(
     )
 
     if not trabajo:
-
         return HTMLResponse(
             """
             <h2>Trabajo no encontrado.</h2>
@@ -1490,67 +1525,42 @@ def iniciar_trabajo(
     )
 
     if not usuario_prizma:
-
         return HTMLResponse(
             """
-            <h2>
-                Debes ingresar el usuario PRIZMA.
-            </h2>
+            <h2>Debes ingresar el usuario PRIZMA.</h2>
             <a href="/">Volver</a>
             """,
             status_code=400,
         )
 
     if not contrasena_prizma:
-
         return HTMLResponse(
             """
-            <h2>
-                Debes ingresar la contraseña PRIZMA.
-            </h2>
+            <h2>Debes ingresar la contraseña PRIZMA.</h2>
             <a href="/">Volver</a>
             """,
             status_code=400,
         )
 
-    if trabajo[
-        "etapa"
-    ] not in [
+    if trabajo["etapa"] not in [
         "analizado",
         "error",
     ]:
-
         return HTMLResponse(
             """
-            <h2>
-                Este trabajo ya fue iniciado.
-            </h2>
+            <h2>Este trabajo ya fue iniciado.</h2>
             """
         )
 
-    trabajo[
-        "etapa"
-    ] = "iniciando"
-
-    trabajo[
-        "mensaje"
-    ] = (
-        "Iniciando navegador y "
-        "autenticación PRIZMA..."
+    trabajo["etapa"] = "iniciando"
+    trabajo["mensaje"] = (
+        "Iniciando navegador y autenticación PRIZMA..."
     )
-
-    trabajo[
-        "terminado"
-    ] = False
-
-    # ========================================================
-    # IMPORTANTE
-    # Las credenciales NO se agregan al diccionario TRABAJOS.
-    # Se pasan directamente a esta ejecución.
-    # ========================================================
+    trabajo["terminado"] = False
+    trabajo["iniciado_en"] = datetime.now().astimezone().isoformat(timespec="seconds")
 
     background_tasks.add_task(
-        ejecutar_cargue,
+        ejecutar_cargue_con_historial,
         trabajo["ruta_excel"],
         trabajo["ruta_zip"],
         trabajo["carpeta_temp"],
@@ -1563,496 +1573,342 @@ def iniciar_trabajo(
         trabajo,
     )
 
-    return HTMLResponse(
-        f"""
-        <!DOCTYPE html>
-
-        <html lang="es">
-
-        <head>
-
-            <meta charset="UTF-8">
-
-            <title>
-                Cargue PRIZMA
-            </title>
-
-            <style>
-
-                body {{
-                    font-family: Arial, sans-serif;
-                    background: #f4f6fb;
-                    margin: 0;
-                    color: #1f2937;
-                }}
-
-                .caja {{
-                    width: 780px;
-                    max-width:
-                        calc(100% - 40px);
-                    margin: 70px auto;
-                    background: white;
-                    padding: 35px;
-                    border-radius: 16px;
-                    box-shadow:
-                        0 8px 30px
-                        rgba(0,0,0,.08);
-                }}
-
-                .barra {{
-                    height: 20px;
-                    background: #e5e7eb;
-                    border-radius: 20px;
-                    overflow: hidden;
-                    margin: 25px 0;
-                }}
-
-                .progreso {{
-                    height: 100%;
-                    width: 0%;
-                    background: #16a34a;
-                    transition: width .4s;
-                }}
-
-                .numeros {{
-                    display: grid;
-                    grid-template-columns:
-                        repeat(3, 1fr);
-                    gap: 15px;
-                    margin-top: 20px;
-                }}
-
-                .numero {{
-                    background: #f8fafc;
-                    border-radius: 10px;
-                    padding: 15px;
-                    text-align: center;
-                }}
-
-                .numero span {{
-                    display: block;
-                    color: #6b7280;
-                    margin-bottom: 5px;
-                }}
-
-                .numero strong {{
-                    font-size: 24px;
-                }}
-
-                .estado {{
-                    padding: 16px;
-                    background: #f8fafc;
-                    border-radius: 10px;
-                    min-height: 55px;
-                }}
-
-                .porcentaje {{
-                    text-align: right;
-                    color: #6b7280;
-                }}
-
-                a {{
-                    display: inline-block;
-                    margin-top: 25px;
-                    padding: 13px 20px;
-                    background: #111827;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 8px;
-                    font-weight: bold;
-                }}
-
-                .lista-actividades {{
-                    margin-top: 28px;
-                    border-top: 1px solid #e5e7eb;
-                    padding-top: 22px;
-                }}
-
-                .lista-actividades h3 {{
-                    margin-top: 0;
-                    margin-bottom: 14px;
-                }}
-
-                .actividad-progreso {{
-                    display: flex;
-                    gap: 12px;
-                    align-items: flex-start;
-                    padding: 11px 12px;
-                    margin-bottom: 8px;
-                    background: #f8fafc;
-                    border-radius: 9px;
-                    border: 1px solid #e5e7eb;
-                }}
-
-                .actividad-icono {{
-                    width: 24px;
-                    flex: 0 0 24px;
-                    text-align: center;
-                    font-size: 18px;
-                    line-height: 1.3;
-                }}
-
-                .actividad-contenido {{
-                    min-width: 0;
-                    flex: 1;
-                }}
-
-                .actividad-nombre {{
-                    font-weight: bold;
-                    line-height: 1.35;
-                }}
-
-                .actividad-error {{
-                    margin-top: 4px;
-                    color: #b91c1c;
-                    font-size: 13px;
-                    word-break: break-word;
-                }}
-
-                .actividad-ok {{
-                    background: #ecfdf5;
-                    border-color: #bbf7d0;
-                }}
-
-                .actividad-error-fila {{
-                    background: #fef2f2;
-                    border-color: #fecaca;
-                }}
-
-                .actividad-procesando {{
-                    background: #eff6ff;
-                    border-color: #bfdbfe;
-                }}
-
-                .final {{
-                    margin-top: 25px;
-                    padding: 18px;
-                    background: #ecfdf5;
-                    border-radius: 10px;
-                }}
-
-            </style>
-
-        </head>
-
-        <body>
-
-            <div class="caja">
-
-                <h1>
-                    Auto Prizma Pro
-                </h1>
-
-                <h2>
-                    Cargue de curso
-                </h2>
-
-                <div
-                    id="estado"
-                    class="estado"
-                >
-                    Iniciando...
+    html_progreso = r"""
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Cargue en progreso - Auto Prizma Pro</title>
+        <style>
+            :root {
+                --fondo:#f7f8fc; --panel:#fff; --texto:#101828; --muted:#667085;
+                --borde:#e5e7ef; --morado:#5548e8; --verde:#0ea968; --rojo:#ef4444;
+                --sombra:0 10px 30px rgba(29,41,57,.06);
+            }
+            * { box-sizing:border-box; }
+            body { margin:0; font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--fondo); color:var(--texto); }
+            .app { min-height:100vh; display:grid; grid-template-columns:235px 1fr; }
+            .sidebar { position:sticky; top:0; height:100vh; background:#fff; border-right:1px solid var(--borde); padding:28px 20px; display:flex; flex-direction:column; }
+            .marca { display:flex; align-items:center; gap:12px; margin-bottom:34px; }
+            .logo { width:44px; height:44px; border-radius:13px; display:grid; place-items:center; background:linear-gradient(145deg,#6d5dfc,#4338ca); box-shadow:0 8px 20px rgba(79,70,229,.25); flex:0 0 44px; }
+            .logo svg{width:29px;height:29px;overflow:visible}.logo svg path:first-child{fill:#fff}.logo svg path:last-child{fill:#c7d2fe}
+            .marca strong { display:block; font-size:18px; }
+            .marca span { display:block; color:var(--muted); font-size:12px; margin-top:3px; }
+            .nav { display:grid; gap:8px; }
+            .nav-item { padding:12px 14px; border-radius:11px; color:#475467; font-size:14px; display:flex; gap:11px; align-items:center; text-decoration:none; transition:.18s ease; }
+            a.nav-item:hover{background:#f7f5ff;color:#4f46e5}.nav-item.activo{background:#f1efff;color:#4f46e5;font-weight:700}.nav-item.proximamente{opacity:.48;cursor:default}.nav-item.proximamente small{margin-left:auto;font-size:9px}
+            .estado-servicio { margin-top:auto; border:1px solid var(--borde); border-radius:14px; padding:15px; background:#fff; }
+            .servicio-linea { display:flex; align-items:center; gap:8px; color:#07894f; font-size:13px; font-weight:700; }
+            .punto { width:8px; height:8px; border-radius:50%; background:#15b76a; }
+            .servicio-mini { margin-top:13px; display:flex; justify-content:space-between; font-size:12px; color:var(--muted); }
+            .chip { background:#eef4ff; color:#3538cd; padding:4px 8px; border-radius:999px; }
+            .contenido { padding:28px 34px 45px; max-width:1450px; width:100%; margin:0 auto; }
+            .panel { background:#fff; border:1px solid var(--borde); border-radius:16px; box-shadow:var(--sombra); }
+            .cabecera-progreso { padding:25px 28px; }
+            .cabecera-linea { display:flex; justify-content:space-between; align-items:center; gap:20px; }
+            .cabecera-titulo { display:flex; gap:13px; align-items:center; }
+            .icono-subida { width:43px; height:43px; border-radius:12px; background:#f1efff; color:#4f46e5; display:grid; place-items:center; font-size:21px; }
+            .cabecera-titulo h1 { margin:0; font-size:22px; }
+            .porcentaje { font-size:14px; color:var(--muted); }
+            .porcentaje strong { font-size:18px; color:#4f46e5; }
+            .barra { height:11px; background:#eef0f5; border-radius:999px; overflow:hidden; margin:22px 0 14px; }
+            .progreso { height:100%; width:0%; border-radius:999px; background:linear-gradient(90deg,#6759f5,#4f46e5); transition:width .35s ease; }
+            .estado { color:#4f46e5; font-size:14px; font-weight:600; line-height:1.45; }
+            .numeros { display:grid; grid-template-columns:repeat(3,1fr); gap:18px; margin:20px 0; }
+            .numero { padding:20px; display:flex; align-items:center; gap:15px; }
+            .numero-icono { width:48px; height:48px; border-radius:50%; display:grid; place-items:center; font-weight:900; font-size:20px; }
+            .numero.procesadas .numero-icono { background:#eef4ff; color:#4f46e5; }
+            .numero.exitosas .numero-icono { background:#e9f9f1; color:#0a9b5b; }
+            .numero.errores .numero-icono { background:#fff0f1; color:#e5484d; }
+            .numero span { display:block; color:var(--muted); font-size:13px; }
+            .numero strong { display:block; font-size:28px; margin-top:2px; }
+            .zona { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(280px,.75fr); gap:20px; align-items:start; }
+            .lista-panel, .estado-panel { padding:23px; }
+            .titulo-panel { margin:0 0 16px; font-size:17px; }
+            .lista-actividades { max-height:570px; overflow:auto; border:1px solid var(--borde); border-radius:12px; }
+            .actividad-progreso { display:grid; grid-template-columns:27px 1fr; gap:10px; align-items:start; padding:11px 13px; border-bottom:1px solid #eef0f4; background:#fff; }
+            .actividad-progreso:last-child { border-bottom:0; }
+            .actividad-icono { width:23px; height:23px; display:grid; place-items:center; font-size:15px; }
+            .actividad-nombre { font-size:13px; line-height:1.4; }
+            .actividad-error { color:#b42318; font-size:11px; margin-top:4px; word-break:break-word; }
+            .actividad-ok { background:#fbfffd; }
+            .actividad-error-fila { background:#fffafa; }
+            .actividad-procesando { background:#f7f6ff; box-shadow:inset 3px 0 0 #5b48e8; }
+            .estado-panel .estado-caja { background:#f8f9fc; border:1px solid var(--borde); border-radius:12px; padding:17px; margin-bottom:14px; }
+            .estado-caja span { display:block; color:var(--muted); font-size:12px; }
+            .estado-caja strong { display:block; margin-top:6px; font-size:14px; line-height:1.45; }
+            .leyenda { display:grid; gap:12px; margin-top:22px; }
+            .leyenda div { display:flex; align-items:center; gap:9px; color:#475467; font-size:13px; }
+            .final { margin-top:18px; padding:18px; border-radius:12px; background:#ecfdf5; border:1px solid #a7f3d0; }
+            .final h3 { margin:0 0 6px; }
+            .final p { margin:0; color:#475467; font-size:13px; }
+            .descarga { display:inline-flex; margin-top:14px; padding:11px 14px; border-radius:9px; background:#4f46e5; color:#fff; text-decoration:none; font-size:13px; font-weight:800; }
+            .pie { margin-top:18px; color:var(--muted); font-size:12px; text-align:center; }
+            @media(max-width:1050px) { .app{grid-template-columns:1fr}.sidebar{display:none}.contenido{padding:20px}.zona{grid-template-columns:1fr} }
+            @media(max-width:680px) { .numeros{grid-template-columns:1fr}.contenido{padding:14px}.cabecera-linea{align-items:flex-start;flex-direction:column} }
+        </style>
+    </head>
+    <body>
+        <div class="app">
+            <aside class="sidebar">
+                <div class="marca">
+                    <div class="logo" aria-label="Auto Prizma Pro">
+                        <svg viewBox="0 0 48 48" aria-hidden="true">
+                            <path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/>
+                            <path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/>
+                        </svg>
+                    </div>
+                    <div><strong>Auto Prizma Pro</strong><span>Cargue automático</span></div>
                 </div>
-
-                <div class="barra">
-
-                    <div
-                        id="progreso"
-                        class="progreso"
-                    ></div>
-
+                <nav class="nav">
+                    <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
+                    <a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
+                    <a class="nav-item" href="/historial">◷ <span>Historial</span></a>
+                    <a class="nav-item" href="/reportes">▥ <span>Reportes</span></a>
+                </nav>
+                <div class="estado-servicio">
+                    <div class="servicio-linea"><span class="punto"></span> Servicio activo</div>
+                    <div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div>
+                    <div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div>
                 </div>
+            </aside>
 
-                <div
-                    id="porcentaje"
-                    class="porcentaje"
-                >
-                    0%
-                </div>
+            <main id="cargue-progreso" class="contenido">
+                <section class="panel cabecera-progreso">
+                    <div class="cabecera-linea">
+                        <div class="cabecera-titulo">
+                            <div class="icono-subida">⇧</div>
+                            <h1>Cargue en progreso</h1>
+                        </div>
+                        <div class="porcentaje"><strong id="porcentaje">0%</strong> completado</div>
+                    </div>
+                    <div class="barra"><div id="progreso" class="progreso"></div></div>
+                    <div id="estado" class="estado">Iniciando...</div>
+                </section>
 
-                <div class="numeros">
+                <section class="numeros">
+                    <div class="panel numero procesadas">
+                        <div class="numero-icono">↻</div>
+                        <div><span>Procesadas</span><strong id="procesadas">0</strong></div>
+                    </div>
+                    <div class="panel numero exitosas">
+                        <div class="numero-icono">✓</div>
+                        <div><span>Exitosas</span><strong id="exitosas">0</strong></div>
+                    </div>
+                    <div class="panel numero errores">
+                        <div class="numero-icono">×</div>
+                        <div><span>Errores</span><strong id="errores">0</strong></div>
+                    </div>
+                </section>
 
-                    <div class="numero">
-
-                        <span>
-                            Procesadas
-                        </span>
-
-                        <strong id="procesadas">
-                            0
-                        </strong>
-
+                <section class="zona">
+                    <div class="panel lista-panel">
+                        <h2 class="titulo-panel">Actividades del cargue</h2>
+                        <div id="lista-actividades" class="lista-actividades">
+                            <div class="actividad-progreso">Preparando lista de actividades...</div>
+                        </div>
+                        <div class="pie">El progreso se actualiza automáticamente.</div>
                     </div>
 
-                    <div class="numero">
-
-                        <span>
-                            Exitosas
-                        </span>
-
-                        <strong id="exitosas">
-                            0
-                        </strong>
-
+                    <div class="panel estado-panel">
+                        <h2 class="titulo-panel">Estado del proceso</h2>
+                        <div class="estado-caja">
+                            <span>Actividad actual</span>
+                            <strong id="actividad-actual">Preparando cargue...</strong>
+                        </div>
+                        <div class="estado-caja">
+                            <span>Total de actividades</span>
+                            <strong id="total-actividades">—</strong>
+                        </div>
+                        <div class="leyenda">
+                            <div>⏳ Pendiente</div>
+                            <div>🔄 Procesando</div>
+                            <div>✅ Completada</div>
+                            <div>❌ Con error</div>
+                        </div>
+                        <div id="final"></div>
                     </div>
+                </section>
+            </main>
+        </div>
 
-                    <div class="numero">
+        <script>
+            const trabajoId = "__TRABAJO_ID__";
 
-                        <span>
-                            Errores
-                        </span>
-
-                        <strong id="errores">
-                            0
-                        </strong>
-
-                    </div>
-
-                </div>
-
-                <div class="lista-actividades">
-
-                    <h3>
-                        Actividades del cargue
-                    </h3>
-
-                    <div id="lista-actividades">
-                        Preparando lista de actividades...
-                    </div>
-
-                </div>
-
-                <div id="final"></div>
-
-            </div>
-
-            <script>
-
-                const trabajoId =
-                    "{trabajo_id}";
-
-                function escaparHtml(texto) {{
-
-                    return String(
-                        texto ?? ""
-                    )
+            function escaparHtml(texto) {
+                return String(texto ?? "")
                     .replaceAll("&", "&amp;")
                     .replaceAll("<", "&lt;")
                     .replaceAll(">", "&gt;")
                     .replaceAll('"', "&quot;")
                     .replaceAll("'", "&#039;");
+            }
 
-                }}
+            function renderizarActividades(actividades) {
+                const contenedor = document.getElementById("lista-actividades");
 
-                function renderizarActividades(
-                    actividades
-                ) {{
+                if (!Array.isArray(actividades) || actividades.length === 0) {
+                    contenedor.innerHTML = '<div class="actividad-progreso">Preparando lista de actividades...</div>';
+                    return;
+                }
 
-                    const contenedor =
-                        document.getElementById(
-                            "lista-actividades"
-                        );
+                let html = "";
+                let actual = "Preparando cargue...";
 
-                    if (
-                        !Array.isArray(actividades)
-                        || actividades.length === 0
-                    ) {{
+                for (const actividad of actividades) {
+                    let icono = "⏳";
+                    let clase = "";
 
-                        contenedor.innerHTML =
-                            "Preparando lista de actividades...";
+                    if (actividad.estado === "procesando") {
+                        icono = "🔄";
+                        clase = "actividad-procesando";
+                        actual = actividad.numero + ". " + actividad.nombre;
+                    } else if (actividad.estado === "ok") {
+                        icono = "✅";
+                        clase = "actividad-ok";
+                    } else if (actividad.estado === "error") {
+                        icono = "❌";
+                        clase = "actividad-error-fila";
+                    }
 
+                    html += '<div class="actividad-progreso ' + clase + '">' +
+                        '<div class="actividad-icono">' + icono + '</div>' +
+                        '<div><div class="actividad-nombre">' +
+                        actividad.numero + '. ' + escaparHtml(actividad.nombre) + '</div>';
+
+                    if (actividad.estado === "error" && actividad.error) {
+                        html += '<div class="actividad-error">' + escaparHtml(actividad.error) + '</div>';
+                    }
+
+                    html += '</div></div>';
+                }
+
+                contenedor.innerHTML = html;
+                document.getElementById("actividad-actual").innerText = actual;
+            }
+
+            async function revisarEstado() {
+                try {
+                    const respuesta = await fetch("/estado/" + trabajoId);
+                    const datos = await respuesta.json();
+
+                    document.getElementById("estado").innerText = datos.mensaje;
+                    document.getElementById("procesadas").innerText = datos.procesadas;
+                    document.getElementById("exitosas").innerText = datos.exitosas;
+                    document.getElementById("errores").innerText = datos.errores;
+                    document.getElementById("total-actividades").innerText = datos.total || "—";
+
+                    renderizarActividades(datos.detalle_actividades);
+
+                    let porcentaje = 0;
+                    if (datos.total > 0) {
+                        porcentaje = (datos.procesadas / datos.total) * 100;
+                    }
+                    porcentaje = Math.min(100, porcentaje);
+
+                    document.getElementById("progreso").style.width = porcentaje + "%";
+                    document.getElementById("porcentaje").innerText = Math.round(porcentaje) + "%";
+
+                    if (datos.terminado) {
+                        document.getElementById("actividad-actual").innerText = "Proceso finalizado";
+
+                        let html = '<div class="final"><h3>Proceso terminado</h3><p>' +
+                            escaparHtml(datos.mensaje) + '</p>';
+
+                        if (datos.reporte_disponible) {
+                            html += '<a class="descarga" href="/reporte/' + trabajoId + '">Descargar reporte CSV</a>';
+                        }
+
+                        html += '</div>';
+                        document.getElementById("final").innerHTML = html;
                         return;
+                    }
 
-                    }}
+                    setTimeout(revisarEstado, 1500);
+                } catch (error) {
+                    document.getElementById("estado").innerText = "Error consultando estado.";
+                    setTimeout(revisarEstado, 3000);
+                }
+            }
 
-                    let html = "";
+            revisarEstado();
+        </script>
+    </body>
+    </html>
+    """
 
-                    for (const actividad of actividades) {{
-
-                        let icono = "⏳";
-                        let clase = "";
-
-                        if (actividad.estado === "procesando") {{
-                            icono = "🔄";
-                            clase = "actividad-procesando";
-                        }}
-                        else if (actividad.estado === "ok") {{
-                            icono = "✅";
-                            clase = "actividad-ok";
-                        }}
-                        else if (actividad.estado === "error") {{
-                            icono = "❌";
-                            clase = "actividad-error-fila";
-                        }}
-
-                        html +=
-                            '<div class="actividad-progreso ' +
-                            clase +
-                            '">' +
-                            '<div class="actividad-icono">' +
-                            icono +
-                            '</div>' +
-                            '<div class="actividad-contenido">' +
-                            '<div class="actividad-nombre">' +
-                            actividad.numero +
-                            '. ' +
-                            escaparHtml(actividad.nombre) +
-                            '</div>';
-
-                        if (
-                            actividad.estado === "error"
-                            && actividad.error
-                        ) {{
-
-                            html +=
-                                '<div class="actividad-error">' +
-                                escaparHtml(actividad.error) +
-                                '</div>';
-
-                        }}
-
-                        html +=
-                            '</div>' +
-                            '</div>';
-
-                    }}
-
-                    contenedor.innerHTML = html;
-
-                }}
-
-                async function revisarEstado() {{
-
-                    try {{
-
-                        const respuesta =
-                            await fetch(
-                                "/estado/" +
-                                trabajoId
-                            );
-
-                        const datos =
-                            await respuesta.json();
-
-                        document.getElementById(
-                            "estado"
-                        ).innerText =
-                            datos.mensaje;
-
-                        document.getElementById(
-                            "procesadas"
-                        ).innerText =
-                            datos.procesadas;
-
-                        document.getElementById(
-                            "exitosas"
-                        ).innerText =
-                            datos.exitosas;
-
-                        document.getElementById(
-                            "errores"
-                        ).innerText =
-                            datos.errores;
-
-                        renderizarActividades(
-                            datos.detalle_actividades
-                        );
-
-                        let porcentaje = 0;
-
-                        if (datos.total > 0) {{
-
-                            porcentaje =
-                                (
-                                    datos.procesadas
-                                    /
-                                    datos.total
-                                ) * 100;
-
-                        }}
-
-                        porcentaje =
-                            Math.min(
-                                100,
-                                porcentaje
-                            );
-
-                        document.getElementById(
-                            "progreso"
-                        ).style.width =
-                            porcentaje + "%";
-
-                        document.getElementById(
-                            "porcentaje"
-                        ).innerText =
-                            Math.round(
-                                porcentaje
-                            ) + "%";
-
-                        if (datos.terminado) {{
-
-                            let html =
-                                '<div class="final">' +
-                                '<h3>Proceso terminado</h3>' +
-                                '<p>' +
-                                datos.mensaje +
-                                '</p>';
-
-                            if (
-                                datos.reporte_disponible
-                            ) {{
-
-                                html +=
-                                    '<a href="/reporte/' +
-                                    trabajoId +
-                                    '">' +
-                                    'Descargar reporte CSV' +
-                                    '</a>';
-
-                            }}
-
-                            html += '</div>';
-
-                            document.getElementById(
-                                "final"
-                            ).innerHTML =
-                                html;
-
-                            return;
-
-                        }}
-
-                        setTimeout(
-                            revisarEstado,
-                            1500
-                        );
-
-                    }}
-                    catch (error) {{
-
-                        document.getElementById(
-                            "estado"
-                        ).innerText =
-                            "Error consultando estado.";
-
-                        setTimeout(
-                            revisarEstado,
-                            3000
-                        );
-
-                    }}
-
-                }}
-
-                revisarEstado();
-
-            </script>
-
-        </body>
-
-        </html>
-        """
+    pagina_progreso = html_progreso.replace(
+        "__TRABAJO_ID__",
+        trabajo_id,
     )
+    trabajo["pagina_progreso"] = pagina_progreso
+
+    return HTMLResponse(pagina_progreso)
+
+
+def _pagina_sin_cargue_actual():
+    return HTMLResponse(r'''<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Auto Prizma Pro</title>
+<style>
+:root{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 12px 34px rgba(29,41,57,.06)}*{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}.app{min-height:100vh;display:grid;grid-template-columns:235px 1fr}.sidebar{height:100vh;background:#fff;border-right:1px solid var(--borde);padding:28px 20px;display:flex;flex-direction:column}.marca{display:flex;align-items:center;gap:12px;margin-bottom:34px}.logo{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#6d5dfc,#4338ca);box-shadow:0 8px 20px rgba(79,70,229,.25)}.logo svg{width:29px;height:29px}.logo svg path:first-child{fill:#fff}.logo svg path:last-child{fill:#c7d2fe}.marca strong{display:block;font-size:18px}.marca span{display:block;color:var(--muted);font-size:12px;margin-top:3px}.nav{display:grid;gap:8px}.nav-item{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;display:flex;gap:11px;align-items:center;text-decoration:none}.nav-item:hover{background:#f7f5ff;color:#4f46e5}.nav-item.activo{background:#f1efff;color:#4f46e5;font-weight:700}.estado-servicio{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}.servicio-linea{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}.punto{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}.servicio-mini{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}.chip{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}.contenido{padding:30px 34px;display:grid;place-items:center}.vacio{width:min(680px,100%);background:#fff;border:1px solid var(--borde);border-radius:18px;box-shadow:var(--sombra);padding:54px 34px;text-align:center}.icono{width:68px;height:68px;border-radius:20px;background:#f1efff;color:#5548e8;display:grid;place-items:center;margin:0 auto 20px;font-size:28px;font-weight:800}.vacio h1{margin:0 0 10px;font-size:27px}.vacio p{margin:0 auto 24px;color:var(--muted);font-size:14px;line-height:1.6;max-width:480px}.boton{display:inline-flex;padding:12px 18px;border-radius:10px;background:linear-gradient(90deg,#5548e8,#6546e8);color:#fff;text-decoration:none;font-size:13px;font-weight:800}@media(max-width:900px){.app{grid-template-columns:1fr}.sidebar{display:none}.contenido{padding:18px}}
+</style></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="vacio"><div class="icono">⇧</div><h1>No hay cargues activos</h1><p>Cuando alguien inicie un proceso desde Inicio, aparecerá aquí para que el equipo pueda consultar su progreso.</p><a class="boton" href="/">Iniciar un nuevo cargue</a></section></main></div></body></html>''')
+
+
+def _formatear_inicio_cargue(fecha_iso):
+    if not fecha_iso:
+        return "Iniciando..."
+    try:
+        fecha = datetime.fromisoformat(fecha_iso)
+        return fecha.strftime("%d/%m/%Y · %I:%M %p").replace("AM", "a. m.").replace("PM", "p. m.")
+    except Exception:
+        return "En progreso"
+
+
+def _pagina_cargues_activos(trabajos):
+    tarjetas = []
+    for trabajo in trabajos:
+        cursos = trabajo.get("cursos") or []
+        if cursos:
+            curso = cursos[0].get("curso") or "Curso sin nombre"
+            programa = cursos[0].get("programa") or "Programa sin nombre"
+            if len(cursos) > 1:
+                curso = f"{curso} y {len(cursos) - 1} curso(s) más"
+        else:
+            curso, programa = "Curso en proceso", "Programa sin nombre"
+        total = int(trabajo.get("total") or 0)
+        procesadas = int(trabajo.get("procesadas") or 0)
+        exitosas = int(trabajo.get("exitosas") or 0)
+        errores = int(trabajo.get("errores") or 0)
+        porcentaje = max(0, min(100, round((procesadas / total) * 100) if total > 0 else 0))
+        trabajo_id = html.escape(str(trabajo.get("id") or ""))
+        tarjetas.append(f'''<article class="carga-card"><div class="curso-bloque"><div class="curso-icono">▣</div><div class="curso-texto"><h2>{html.escape(curso)}</h2><p>Programa: {html.escape(programa)}</p><span class="estado-chip"><span></span> En progreso</span></div></div><div class="inicio-bloque"><small>◷ Iniciado</small><strong>{html.escape(_formatear_inicio_cargue(trabajo.get("iniciado_en")))}</strong></div><div class="avance-bloque"><div class="avance-cab"><span>Progreso general</span><strong>{porcentaje}%</strong></div><div class="barra"><div class="barra-interna" style="width:{porcentaje}%"></div></div><div class="metricas"><div><i class="verde"></i><small>Procesadas</small><strong>{procesadas}</strong></div><div><i class="verde"></i><small>Exitosas</small><strong>{exitosas}</strong></div><div><i class="rojo"></i><small>Errores</small><strong>{errores}</strong></div></div></div><div class="accion-bloque"><a href="/proceso/{trabajo_id}">Entrar al proceso <b>›</b></a><small>Ver detalle por actividad</small></div></article>''')
+    cuerpo = "".join(tarjetas)
+    cantidad = len(trabajos)
+    plural = "s" if cantidad != 1 else ""
+    return HTMLResponse(f'''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Auto Prizma Pro</title><style>
+:root{{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 10px 30px rgba(29,41,57,.05)}}*{{box-sizing:border-box}}body{{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}}.app{{min-height:100vh;display:grid;grid-template-columns:235px 1fr}}.sidebar{{position:sticky;top:0;height:100vh;background:#fff;border-right:1px solid var(--borde);padding:28px 20px;display:flex;flex-direction:column}}.marca{{display:flex;align-items:center;gap:12px;margin-bottom:34px}}.logo{{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#6d5dfc,#4338ca);box-shadow:0 8px 20px rgba(79,70,229,.25)}}.logo svg{{width:29px;height:29px}}.logo svg path:first-child{{fill:#fff}}.logo svg path:last-child{{fill:#c7d2fe}}.marca strong{{display:block;font-size:18px}}.marca span{{display:block;color:var(--muted);font-size:12px;margin-top:3px}}.nav{{display:grid;gap:8px}}.nav-item{{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;display:flex;gap:11px;align-items:center;text-decoration:none}}.nav-item:hover{{background:#f7f5ff;color:#4f46e5}}.nav-item.activo{{background:#f1efff;color:#4f46e5;font-weight:700}}.estado-servicio{{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}}.servicio-linea{{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}}.punto{{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}}.servicio-mini{{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}}.chip{{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}}.contenido{{padding:34px 36px 44px;min-width:0}}.cabecera-top{{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:24px}}.cabecera h1{{font-size:29px;margin:0 0 7px}}.cabecera p{{margin:0;color:var(--muted);font-size:14px;line-height:1.5}}.contador{{background:#f1efff;color:#5548e8;border-radius:999px;padding:8px 12px;font-size:12px;font-weight:800;white-space:nowrap}}.lista{{display:grid;gap:16px}}.carga-card{{background:#fff;border:1px solid var(--borde);border-radius:17px;box-shadow:var(--sombra);padding:22px;display:grid;grid-template-columns:minmax(245px,1.15fr) 170px minmax(320px,1.25fr) 185px;gap:22px;align-items:center}}.curso-bloque{{display:flex;gap:14px;align-items:center;min-width:0}}.curso-icono{{width:58px;height:58px;border-radius:15px;background:#f1efff;color:#5548e8;display:grid;place-items:center;font-size:24px;flex:0 0 58px}}.curso-texto{{min-width:0}}.curso-texto h2{{font-size:16px;margin:0 0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.curso-texto p{{font-size:12px;color:var(--muted);margin:0 0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.estado-chip{{display:inline-flex;align-items:center;gap:6px;background:#eef6ff;color:#1473e6;border-radius:999px;padding:5px 9px;font-size:11px;font-weight:800}}.estado-chip span{{width:6px;height:6px;background:#2e90fa;border-radius:50%}}.inicio-bloque small{{display:block;color:var(--muted);font-size:11px;margin-bottom:7px}}.inicio-bloque strong{{font-size:12px;color:#475467}}.avance-cab{{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:var(--muted);font-size:11px}}.avance-cab strong{{font-size:21px;color:#5548e8}}.barra{{height:10px;border-radius:999px;background:#eeecff;overflow:hidden}}.barra-interna{{height:100%;background:linear-gradient(90deg,#6759f5,#4f46e5);border-radius:999px}}.metricas{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}}.metricas div{{display:grid;grid-template-columns:8px 1fr;column-gap:5px;align-items:center}}.metricas i{{width:7px;height:7px;border-radius:50%}}.metricas i.verde{{background:#12b76a}}.metricas i.rojo{{background:#ef4444}}.metricas small{{font-size:10px;color:var(--muted)}}.metricas strong{{grid-column:2;font-size:14px;margin-top:2px}}.accion-bloque{{border-left:1px solid var(--borde);padding-left:20px;text-align:center}}.accion-bloque a{{display:flex;justify-content:center;align-items:center;gap:8px;background:linear-gradient(90deg,#5548e8,#6546e8);color:#fff;text-decoration:none;font-size:12px;font-weight:800;border-radius:10px;padding:12px 13px}}.accion-bloque b{{font-size:18px}}.accion-bloque small{{display:block;color:var(--muted);font-size:10px;margin-top:8px}}.nota{{margin-top:18px;border:1px solid #ddd8ff;background:#faf9ff;border-radius:14px;padding:14px 17px;color:#475467;font-size:12px}}@media(max-width:1200px){{.carga-card{{grid-template-columns:1fr 1fr}}.accion-bloque{{border-left:0;padding-left:0}}}}@media(max-width:900px){{.app{{grid-template-columns:1fr}}.sidebar{{display:none}}.contenido{{padding:20px}}.carga-card{{grid-template-columns:1fr}}}}
+</style></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="cabecera"><div class="cabecera-top"><div><h1>Cargue actual</h1><p>Aquí puedes ver todos los cursos que están siendo procesados actualmente.<br>Entra a un proceso para revisar el detalle de sus actividades.</p></div><div class="contador">{cantidad} proceso{plural} activo{plural}</div></div></section><section class="lista">{cuerpo}</section><div class="nota"><strong>Vista global del equipo.</strong> Cada tarjeta representa un cargue activo. Para ver la lista detallada de actividades, entra al proceso correspondiente.</div></main></div><script>setTimeout(function(){{window.location.reload();}},3000);</script></body></html>''')
+
+
+@app.get("/cargue-actual", response_class=HTMLResponse)
+def cargue_actual():
+    activos = [trabajo for trabajo in TRABAJOS.values() if trabajo.get("iniciado_en") and not trabajo.get("terminado")]
+    activos.sort(key=lambda item: item.get("iniciado_en", ""), reverse=True)
+    if not activos:
+        return _pagina_sin_cargue_actual()
+    return _pagina_cargues_activos(activos)
+
+
+@app.get("/proceso/{trabajo_id}", response_class=HTMLResponse)
+def ver_proceso(trabajo_id: str):
+    trabajo = TRABAJOS.get(trabajo_id)
+    if not trabajo or not trabajo.get("iniciado_en"):
+        return HTMLResponse("<h2>Proceso no encontrado.</h2><p><a href='/cargue-actual'>Volver a Cargue actual</a></p>", status_code=404)
+    pagina = trabajo.get("pagina_progreso")
+    if pagina:
+        return HTMLResponse(pagina)
+    return HTMLResponse("<h2>El proceso todavía se está preparando.</h2><p><a href='/cargue-actual'>Volver a Cargue actual</a></p>", status_code=202)
 
 
 # ============================================================
@@ -2116,6 +1972,183 @@ def estado_trabajo(
 
 
 # ============================================================
+# HISTORIAL Y REPORTES
+# ============================================================
+
+def _formatear_fecha_hora(fecha_iso):
+    try:
+        fecha = datetime.fromisoformat(fecha_iso)
+    except Exception:
+        return "—", "—"
+
+    fecha_texto = fecha.strftime("%d/%m/%Y")
+    hora = fecha.strftime("%I:%M").lstrip("0") or "0:00"
+    sufijo = "a. m." if fecha.hour < 12 else "p. m."
+    return fecha_texto, f"{hora} {sufijo}"
+
+
+def _pagina_registros(tipo="historial"):
+    registros = list(reversed(_cargar_historial()))
+    es_historial = tipo == "historial"
+    activo_historial = "activo" if es_historial else ""
+    activo_reportes = "" if es_historial else "activo"
+
+    filas = []
+    programas = set()
+
+    if es_historial:
+        for registro in registros:
+            fecha, hora = _formatear_fecha_hora(registro.get("fecha_iso", ""))
+            cursos = registro.get("cursos") or [{"curso": "Curso sin nombre", "programa": "Programa sin nombre"}]
+
+            for item in cursos:
+                curso = str(item.get("curso") or "Curso sin nombre")
+                programa = str(item.get("programa") or "Programa sin nombre")
+                programas.add(programa)
+                busqueda = html.escape(f"{curso} {programa}".lower(), quote=True)
+                programa_attr = html.escape(programa, quote=True)
+                registro_id = html.escape(str(registro.get("id") or ""), quote=True)
+
+                filas.append(
+                    f'<tr class="fila-registro" data-busqueda="{busqueda}" data-programa="{programa_attr}">'
+                    f'<td class="fecha-celda"><span class="icono-fecha">▣</span><div><strong>{html.escape(fecha)}</strong><small>{html.escape(hora)}</small></div></td>'
+                    f'<td>{html.escape(curso)}</td>'
+                    f'<td>{html.escape(programa)}</td>'
+                    f'<td class="accion-celda"><a class="boton-reporte" href="/reporte-guardado/{registro_id}">◉ <span>Ver reporte</span></a></td>'
+                    '</tr>'
+                )
+    else:
+        for registro in registros:
+            fecha, hora = _formatear_fecha_hora(registro.get("fecha_iso", ""))
+            cursos = registro.get("cursos") or [{"curso": "Curso sin nombre", "programa": "Programa sin nombre"}]
+            principal = cursos[0]
+            curso = str(principal.get("curso") or "Curso sin nombre")
+            programa = str(principal.get("programa") or "Programa sin nombre")
+            archivo = str(registro.get("archivo_reporte") or "reporte.csv")
+            programas.add(programa)
+            busqueda = html.escape(f"{archivo} {curso} {programa}".lower(), quote=True)
+            programa_attr = html.escape(programa, quote=True)
+            registro_id = html.escape(str(registro.get("id") or ""), quote=True)
+
+            filas.append(
+                f'<tr class="fila-registro" data-busqueda="{busqueda}" data-programa="{programa_attr}">'
+                f'<td class="fecha-celda"><span class="icono-fecha">▣</span><div><strong>{html.escape(fecha)}</strong><small>{html.escape(hora)}</small></div></td>'
+                f'<td class="archivo-reporte" title="{html.escape(archivo, quote=True)}">{html.escape(archivo)}</td>'
+                f'<td>{html.escape(curso)}</td>'
+                f'<td>{html.escape(programa)}</td>'
+                f'<td class="accion-celda"><a class="boton-reporte" href="/reporte-guardado/{registro_id}">⇩ <span>Descargar</span></a></td>'
+                '</tr>'
+            )
+
+    opciones_programa = ''.join(
+        f'<option value="{html.escape(p, quote=True)}">{html.escape(p)}</option>'
+        for p in sorted(programas, key=str.casefold)
+    )
+
+    if es_historial:
+        titulo = "Historial de cargues"
+        subtitulo = "Consulta los cursos procesados anteriormente y accede a su reporte correspondiente."
+        contador = sum(len(r.get("cursos") or [1]) for r in registros)
+        contador_texto = f"{contador} registros"
+        placeholder = "Buscar curso o programa..."
+        tabla_cabecera = "<th>Fecha y hora</th><th>Curso</th><th>Programa</th><th>Reporte</th>"
+        min_table = "900px"
+        vacio = "Todavía no hay cargues registrados."
+    else:
+        titulo = "Reportes generados"
+        subtitulo = "Todos los reportes se guardan automáticamente con el nombre del curso y el programa correspondiente."
+        contador = len(registros)
+        contador_texto = f"{contador} reportes"
+        placeholder = "Buscar reporte, curso o programa..."
+        tabla_cabecera = "<th>Fecha</th><th>Nombre del reporte</th><th>Curso</th><th>Programa</th><th>Acción</th>"
+        min_table = "1120px"
+        vacio = "Todavía no hay reportes guardados."
+
+    filas_html = ''.join(filas)
+    if not filas_html:
+        filas_html = f'<tr><td colspan="5" class="vacio">{html.escape(vacio)}</td></tr>'
+
+    pagina = '''<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>__TITULO__ - Auto Prizma Pro</title>
+    <style>
+        :root{--fondo:#f7f8fc;--panel:#fff;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 12px 34px rgba(29,41,57,.06)}
+        *{box-sizing:border-box} body{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}
+        .app{min-height:100vh;display:grid;grid-template-columns:235px 1fr}.sidebar{position:sticky;top:0;height:100vh;background:#fff;border-right:1px solid var(--borde);padding:28px 20px;display:flex;flex-direction:column}
+        .marca{display:flex;align-items:center;gap:12px;margin-bottom:34px}.logo{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#6d5dfc,#4338ca);box-shadow:0 8px 20px rgba(79,70,229,.25)}
+        .logo svg{width:29px;height:29px;overflow:visible}.logo svg path:first-child{fill:#fff}.logo svg path:last-child{fill:#c7d2fe}.marca strong{display:block;font-size:18px}.marca span{display:block;color:var(--muted);font-size:12px;margin-top:3px}
+        .nav{display:grid;gap:8px}.nav-item{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;display:flex;gap:11px;align-items:center;text-decoration:none;transition:.18s ease}.nav-item:hover{background:#f7f5ff;color:#4f46e5}.nav-item.activo{background:#f1efff;color:#4f46e5;font-weight:700}
+        .estado-servicio{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}.servicio-linea{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}.punto{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}.servicio-mini{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}.chip{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}
+        .contenido{padding:30px 34px}.panel{background:#fff;border:1px solid var(--borde);border-radius:18px;box-shadow:var(--sombra);padding:28px;max-width:1320px;margin:0 auto}.cabecera{display:flex;align-items:flex-start;justify-content:space-between;gap:20px}h1{font-size:28px;margin:0 0 7px}.subtitulo{margin:0;color:var(--muted);font-size:14px}.contador{background:#f1efff;color:#4f46e5;border-radius:10px;padding:9px 12px;font-size:12px;font-weight:800;white-space:nowrap}
+        .herramientas{display:grid;grid-template-columns:minmax(260px,1fr) 290px;gap:18px;margin:28px 0 22px}.buscador,.filtro{height:52px;border:1px solid #d8dce6;border-radius:11px;background:#fff;display:flex;align-items:center;gap:10px;padding:0 15px;color:#667085}.buscador input,.filtro select{width:100%;border:0;outline:0;background:transparent;font-size:14px;color:#475467}.filtro select{cursor:pointer}
+        .tabla-wrap{border:1px solid var(--borde);border-radius:14px;overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px;min-width:__MIN_TABLE__}thead{background:#faf9ff}th{text-align:left;padding:15px 16px;color:#4338ca;font-size:12px;border-bottom:1px solid var(--borde)}td{padding:15px 16px;border-bottom:1px solid #eef0f4;vertical-align:middle;color:#344054}tbody tr:last-child td{border-bottom:0}.fecha-celda{display:flex;align-items:center;gap:11px;white-space:nowrap}.fecha-celda strong{display:block;font-weight:500}.fecha-celda small{display:block;color:#98a2b3;margin-top:4px}.icono-fecha{width:34px;height:34px;border-radius:9px;background:#f4f1ff;color:#6d5dfc;display:grid;place-items:center}.accion-celda{white-space:nowrap}.boton-reporte{display:inline-flex;align-items:center;gap:7px;border:1px solid #d7d0ff;color:#5b4ce8;text-decoration:none;border-radius:9px;padding:9px 12px;font-weight:700;font-size:12px;background:#fff}.boton-reporte:hover{background:#f7f5ff}.archivo-reporte{max-width:390px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vacio{text-align:center;color:#98a2b3;padding:50px 20px!important}.oculta{display:none}
+        @media(max-width:1050px){.app{grid-template-columns:1fr}.sidebar{display:none}.contenido{padding:20px}}@media(max-width:700px){.contenido{padding:12px}.panel{padding:18px}.cabecera{flex-direction:column}.herramientas{grid-template-columns:1fr}}
+    </style>
+</head>
+<body>
+<div class="app">
+    <aside class="sidebar">
+        <div class="marca"><div class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div>
+        <nav class="nav">
+            <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
+            <a class="nav-item" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
+            <a class="nav-item __ACTIVO_HISTORIAL__" href="/historial">◷ <span>Historial</span></a>
+            <a class="nav-item __ACTIVO_REPORTES__" href="/reportes">▥ <span>Reportes</span></a>
+        </nav>
+        <div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div>
+    </aside>
+    <main class="contenido"><section class="panel"><div class="cabecera"><div><h1>__TITULO__</h1><p class="subtitulo">__SUBTITULO__</p></div><div class="contador">▣ &nbsp;__CONTADOR__</div></div><div class="herramientas"><label class="buscador">⌕ <input id="buscar" type="search" placeholder="__PLACEHOLDER__"></label><label class="filtro">▽ <select id="programa"><option value="">Todos los programas</option>__OPCIONES__</select></label></div><div class="tabla-wrap"><table><thead><tr>__CABECERA__</tr></thead><tbody>__FILAS__</tbody></table></div></section></main>
+</div>
+<script>
+const buscar=document.getElementById('buscar');const programa=document.getElementById('programa');function filtrar(){const texto=(buscar.value||'').trim().toLowerCase();const p=programa.value||'';document.querySelectorAll('.fila-registro').forEach(f=>{const okTexto=!texto||(f.dataset.busqueda||'').includes(texto);const okPrograma=!p||f.dataset.programa===p;f.classList.toggle('oculta',!(okTexto&&okPrograma));});}buscar.addEventListener('input',filtrar);programa.addEventListener('change',filtrar);
+</script>
+</body></html>'''
+
+    pagina = (pagina
+        .replace("__TITULO__", html.escape(titulo))
+        .replace("__SUBTITULO__", html.escape(subtitulo))
+        .replace("__CONTADOR__", html.escape(contador_texto))
+        .replace("__PLACEHOLDER__", html.escape(placeholder, quote=True))
+        .replace("__OPCIONES__", opciones_programa)
+        .replace("__CABECERA__", tabla_cabecera)
+        .replace("__FILAS__", filas_html)
+        .replace("__MIN_TABLE__", min_table)
+        .replace("__ACTIVO_HISTORIAL__", activo_historial)
+        .replace("__ACTIVO_REPORTES__", activo_reportes)
+    )
+    return HTMLResponse(pagina)
+
+
+@app.get("/historial", response_class=HTMLResponse)
+def historial_cargues():
+    return _pagina_registros("historial")
+
+
+@app.get("/reportes", response_class=HTMLResponse)
+def reportes_generados():
+    return _pagina_registros("reportes")
+
+
+@app.get("/reporte-guardado/{registro_id}")
+def descargar_reporte_guardado(registro_id: str):
+    registro = next((r for r in _cargar_historial() if r.get("id") == registro_id), None)
+
+    if not registro:
+        return JSONResponse({"error": "Reporte no encontrado"}, status_code=404)
+
+    nombre = os.path.basename(str(registro.get("archivo_reporte") or ""))
+    ruta = os.path.join(RESULTADOS_DIR, nombre)
+
+    if not nombre or not os.path.isfile(ruta):
+        return JSONResponse({"error": "El archivo del reporte ya no está disponible"}, status_code=404)
+
+    return FileResponse(ruta, media_type="text/csv", filename=nombre)
+
+
+# ============================================================
 # DESCARGAR REPORTE
 # ============================================================
 
@@ -2159,5 +2192,5 @@ def descargar_reporte(
     return FileResponse(
         ruta,
         media_type="text/csv",
-        filename="resultado_prizma.csv",
+        filename=os.path.basename(ruta),
     )
