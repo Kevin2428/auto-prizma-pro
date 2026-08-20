@@ -22,7 +22,7 @@ URL_PRIZMA = "https://admin.prizma.site/inicio-sesion"
 
 VERSION_SCRIPT = "PRUEBA_H5P_NUEVO_GESTION_FINANCIERA_V2"
 
-BUILD_INTERNO = "INTERFAZ_WEB_LOGIN_AUTOMATICO_02"
+BUILD_INTERNO = "INTERFAZ_WEB_LOGIN_AUTOMATICO_03"
 
 
 TEXTOS_DESCRIPCION_A_BORRAR = [
@@ -66,6 +66,57 @@ def actualizar_estado(
 
     if terminado is not None:
         estado["terminado"] = terminado
+
+
+# ============================================================
+# DETALLE DE ACTIVIDADES PARA LA INTERFAZ
+# ============================================================
+
+def preparar_detalle_actividades(
+    estado,
+    actividades,
+):
+
+    estado["detalle_actividades"] = [
+        {
+            "numero": numero,
+            "nombre": actividad["nombre"],
+            "estado": "pendiente",
+            "error": "",
+        }
+        for numero, actividad in enumerate(
+            actividades,
+            start=1,
+        )
+    ]
+
+
+def actualizar_detalle_actividad(
+    estado,
+    numero,
+    nuevo_estado,
+    error="",
+):
+
+    detalle = estado.get(
+        "detalle_actividades",
+        [],
+    )
+
+    indice = numero - 1
+
+    if not (
+        0 <= indice < len(detalle)
+    ):
+        return
+
+    detalle[indice][
+        "estado"
+    ] = nuevo_estado
+
+    detalle[indice][
+        "error"
+    ] = error or ""
 
 
 # ============================================================
@@ -116,6 +167,180 @@ def normalizar_categoria(categoria):
         return "OVA"
 
     return None
+
+
+# ============================================================
+# VARIANTES SEGURAS DE PROGRAMA
+# ============================================================
+
+def obtener_variantes_programa(
+    programa,
+):
+
+    programa_n = normalizar_texto(
+        programa
+    )
+
+    if not programa_n:
+        return set()
+
+    variantes = {
+        programa_n
+    }
+
+    partes = programa_n.split()
+
+    # Ejemplo:
+    # "Esp. en Contratación estatal"
+    # -> "especializacion en contratacion estatal"
+    if partes and partes[0] == "esp":
+
+        resto = " ".join(
+            partes[1:]
+        )
+
+        variante = "especializacion"
+
+        if resto:
+            variante += " " + resto
+
+        variantes.add(
+            variante
+        )
+
+    return variantes
+
+
+# ============================================================
+# NOMBRES DE RECURSOS CORTOS / TRUNCADOS
+# ============================================================
+
+def limpiar_prefijo_tecnico_recurso(
+    nombre_archivo,
+):
+
+    nombre_sin_extension = os.path.splitext(
+        os.path.basename(
+            nombre_archivo
+        )
+    )[0]
+
+    nombre_n = normalizar_texto(
+        nombre_sin_extension
+    )
+
+    # Prefijos observados en paquetes de recursos:
+    # ID003-Tema_4-...
+    # ID012-Tema_3-...
+    nombre_n = re.sub(
+        r"^id\d+\s+tema\s+\d+\s+",
+        "",
+        nombre_n,
+    )
+
+    return nombre_n
+
+
+def recurso_es_prefijo_de_actividad(
+    nombre_archivo,
+    actividad,
+):
+
+    archivo_n = limpiar_prefijo_tecnico_recurso(
+        nombre_archivo
+    )
+
+    actividad_n = normalizar_texto(
+        actividad["nombre"]
+    )
+
+    if not archivo_n or not actividad_n:
+        return False
+
+    palabras_archivo = archivo_n.split()
+    palabras_actividad = actividad_n.split()
+
+    if not palabras_archivo:
+        return False
+
+    if len(palabras_archivo) > len(palabras_actividad):
+        return False
+
+    # Permitimos incluso una sola palabra cuando es suficientemente
+    # descriptiva. La seguridad real se valida después comprobando
+    # que ese prefijo identifique una única actividad del curso.
+    if len(palabras_archivo[0]) < 4:
+        return False
+
+    for indice, palabra_archivo in enumerate(
+        palabras_archivo
+    ):
+
+        palabra_actividad = palabras_actividad[indice]
+
+        # Todas las palabras anteriores a la última deben coincidir.
+        if indice < len(palabras_archivo) - 1:
+
+            if palabra_archivo != palabra_actividad:
+                return False
+
+            continue
+
+        # La última palabra puede estar completa o truncada.
+        if palabra_archivo == palabra_actividad:
+            continue
+
+        if len(palabra_archivo) < 4:
+            return False
+
+        if not palabra_actividad.startswith(
+            palabra_archivo
+        ):
+            return False
+
+    return True
+
+
+def recurso_corto_es_unico_para_actividad(
+    nombre_archivo,
+    actividad,
+    actividades_curso,
+):
+
+    if not actividades_curso:
+        return False
+
+    tipo_objetivo = actividad[
+        "tipo_archivo"
+    ]
+
+    compatibles = []
+
+    for candidata in actividades_curso:
+
+        if candidata[
+            "tipo_archivo"
+        ] != tipo_objetivo:
+            continue
+
+        if recurso_es_prefijo_de_actividad(
+            nombre_archivo,
+            candidata,
+        ):
+
+            compatibles.append(
+                candidata
+            )
+
+    if len(compatibles) != 1:
+        return False
+
+    unica = compatibles[0]
+
+    return (
+        unica["fila_excel"]
+        == actividad["fila_excel"]
+    )
 
 
 # ============================================================
@@ -512,6 +737,7 @@ def resolver_recurso(
     actividad,
     indice_recursos,
     carpeta_temp,
+    actividades_curso,
 ):
 
     print()
@@ -585,12 +811,100 @@ def resolver_recurso(
         len(candidatos),
     )
 
+    # --------------------------------------------------------
+    # SEGUNDO MÉTODO SEGURO PARA NOMBRES CORTOS / TRUNCADOS
+    # --------------------------------------------------------
+    # Se usa únicamente cuando el método normal no encontró
+    # ningún candidato con puntuación >= 100.
+    #
+    # Ejemplos admitidos:
+    # "Dimensiones.h5p"
+    # "Dimensiones e indicadores.h5p"
+    # "... principios de legalid.h5p"
+    #
+    # No adivina: el prefijo del archivo debe identificar una
+    # única actividad del curso para ese tipo de archivo.
+    # --------------------------------------------------------
+
     if not candidatos:
 
-        return (
-            None,
-            "ERROR_RECURSO_NO_ENCONTRADO",
+        candidatos_cortos = []
+        hubo_ambiguos = False
+
+        for recurso in indice_recursos:
+
+            if recurso[
+                "extension"
+            ] != extension:
+                continue
+
+            if not recurso_es_prefijo_de_actividad(
+                recurso["nombre"],
+                actividad,
+            ):
+                continue
+
+            if not recurso_corto_es_unico_para_actividad(
+                recurso["nombre"],
+                actividad,
+                actividades_curso,
+            ):
+
+                hubo_ambiguos = True
+                continue
+
+            candidato = recurso.copy()
+
+            candidato[
+                "puntuacion"
+            ] = puntuar_recurso(
+                recurso["nombre"],
+                actividad,
+            )
+
+            candidato[
+                "metodo"
+            ] = "PREFIJO_UNICO"
+
+            candidatos_cortos.append(
+                candidato
+            )
+
+        print(
+            "Candidatos por prefijo único:",
+            len(candidatos_cortos),
         )
+
+        for candidato in candidatos_cortos:
+
+            print(
+                "  →",
+                candidato["nombre"],
+                "| PREFIJO_UNICO",
+            )
+
+        if len(candidatos_cortos) == 0:
+
+            if hubo_ambiguos:
+
+                return (
+                    None,
+                    "ERROR_RECURSO_AMBIGUO",
+                )
+
+            return (
+                None,
+                "ERROR_RECURSO_NO_ENCONTRADO",
+            )
+
+        if len(candidatos_cortos) > 1:
+
+            return (
+                None,
+                "ERROR_RECURSO_DUPLICADO",
+            )
+
+        candidatos = candidatos_cortos
 
     mejor_puntuacion = max(
         candidato["puntuacion"]
@@ -1131,7 +1445,7 @@ def analizar_resultados_pagina(
         actividad["unidad"]
     )
 
-    programa_objetivo = normalizar_texto(
+    variantes_programa = obtener_variantes_programa(
         actividad["programa"]
     )
 
@@ -1171,9 +1485,10 @@ def analizar_resultados_pagina(
             in texto_n
         )
 
-        cumple_programa = (
-            programa_objetivo
-            in texto_n
+        cumple_programa = any(
+            variante
+            and variante in texto_n
+            for variante in variantes_programa
         )
 
         if actividad[
@@ -2345,6 +2660,7 @@ def procesar_actividad(
     carpeta_temp,
     respuestas,
     captura,
+    actividades_curso,
 ):
 
     print()
@@ -2379,6 +2695,7 @@ def procesar_actividad(
         actividad,
         indice_recursos,
         carpeta_temp,
+        actividades_curso,
     )
 
     if error:
@@ -2810,6 +3127,11 @@ def ejecutar_cargue(
 
         actividades_a_procesar = actividades
 
+        preparar_detalle_actividades(
+            estado,
+            actividades_a_procesar,
+        )
+
         print()
         print(
             "Actividades que se procesarán:",
@@ -2945,6 +3267,12 @@ def ejecutar_cargue(
                     ),
                 )
 
+                actualizar_detalle_actividad(
+                    estado,
+                    numero,
+                    "procesando",
+                )
+
                 try:
 
                     resultado = procesar_actividad(
@@ -2954,6 +3282,7 @@ def ejecutar_cargue(
                         carpeta_temp,
                         respuestas,
                         captura,
+                        actividades_a_procesar,
                     )
 
                 except Exception as e:
@@ -3003,6 +3332,12 @@ def ejecutar_cargue(
 
                     exitosas += 1
 
+                    actualizar_detalle_actividad(
+                        estado,
+                        numero,
+                        "ok",
+                    )
+
                     print()
                     print(
                         "✅ ACTIVIDAD COMPLETADA."
@@ -3026,6 +3361,13 @@ def ejecutar_cargue(
                 else:
 
                     errores += 1
+
+                    actualizar_detalle_actividad(
+                        estado,
+                        numero,
+                        "error",
+                        resultado["error"],
+                    )
 
                     print()
                     print(

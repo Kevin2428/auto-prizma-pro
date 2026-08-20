@@ -1273,6 +1273,9 @@ async def analizar(
 
             "terminado":
                 False,
+
+            "detalle_actividades":
+                [],
         }
 
         resultado = {
@@ -1500,6 +1503,68 @@ def iniciar_trabajo(
                     font-weight: bold;
                 }}
 
+                .lista-actividades {{
+                    margin-top: 28px;
+                    border-top: 1px solid #e5e7eb;
+                    padding-top: 22px;
+                }}
+
+                .lista-actividades h3 {{
+                    margin-top: 0;
+                    margin-bottom: 14px;
+                }}
+
+                .actividad-progreso {{
+                    display: flex;
+                    gap: 12px;
+                    align-items: flex-start;
+                    padding: 11px 12px;
+                    margin-bottom: 8px;
+                    background: #f8fafc;
+                    border-radius: 9px;
+                    border: 1px solid #e5e7eb;
+                }}
+
+                .actividad-icono {{
+                    width: 24px;
+                    flex: 0 0 24px;
+                    text-align: center;
+                    font-size: 18px;
+                    line-height: 1.3;
+                }}
+
+                .actividad-contenido {{
+                    min-width: 0;
+                    flex: 1;
+                }}
+
+                .actividad-nombre {{
+                    font-weight: bold;
+                    line-height: 1.35;
+                }}
+
+                .actividad-error {{
+                    margin-top: 4px;
+                    color: #b91c1c;
+                    font-size: 13px;
+                    word-break: break-word;
+                }}
+
+                .actividad-ok {{
+                    background: #ecfdf5;
+                    border-color: #bbf7d0;
+                }}
+
+                .actividad-error-fila {{
+                    background: #fef2f2;
+                    border-color: #fecaca;
+                }}
+
+                .actividad-procesando {{
+                    background: #eff6ff;
+                    border-color: #bfdbfe;
+                }}
+
                 .final {{
                     margin-top: 25px;
                     padding: 18px;
@@ -1586,6 +1651,18 @@ def iniciar_trabajo(
 
                 </div>
 
+                <div class="lista-actividades">
+
+                    <h3>
+                        Actividades del cargue
+                    </h3>
+
+                    <div id="lista-actividades">
+                        Preparando lista de actividades...
+                    </div>
+
+                </div>
+
                 <div id="final"></div>
 
             </div>
@@ -1594,6 +1671,96 @@ def iniciar_trabajo(
 
                 const trabajoId =
                     "{trabajo_id}";
+
+                function escaparHtml(texto) {{
+
+                    return String(
+                        texto ?? ""
+                    )
+                    .replaceAll("&", "&amp;")
+                    .replaceAll("<", "&lt;")
+                    .replaceAll(">", "&gt;")
+                    .replaceAll('"', "&quot;")
+                    .replaceAll("'", "&#039;");
+
+                }}
+
+                function renderizarActividades(
+                    actividades
+                ) {{
+
+                    const contenedor =
+                        document.getElementById(
+                            "lista-actividades"
+                        );
+
+                    if (
+                        !Array.isArray(actividades)
+                        || actividades.length === 0
+                    ) {{
+
+                        contenedor.innerHTML =
+                            "Preparando lista de actividades...";
+
+                        return;
+
+                    }}
+
+                    let html = "";
+
+                    for (const actividad of actividades) {{
+
+                        let icono = "⏳";
+                        let clase = "";
+
+                        if (actividad.estado === "procesando") {{
+                            icono = "🔄";
+                            clase = "actividad-procesando";
+                        }}
+                        else if (actividad.estado === "ok") {{
+                            icono = "✅";
+                            clase = "actividad-ok";
+                        }}
+                        else if (actividad.estado === "error") {{
+                            icono = "❌";
+                            clase = "actividad-error-fila";
+                        }}
+
+                        html +=
+                            '<div class="actividad-progreso ' +
+                            clase +
+                            '">' +
+                            '<div class="actividad-icono">' +
+                            icono +
+                            '</div>' +
+                            '<div class="actividad-contenido">' +
+                            '<div class="actividad-nombre">' +
+                            actividad.numero +
+                            '. ' +
+                            escaparHtml(actividad.nombre) +
+                            '</div>';
+
+                        if (
+                            actividad.estado === "error"
+                            && actividad.error
+                        ) {{
+
+                            html +=
+                                '<div class="actividad-error">' +
+                                escaparHtml(actividad.error) +
+                                '</div>';
+
+                        }}
+
+                        html +=
+                            '</div>' +
+                            '</div>';
+
+                    }}
+
+                    contenedor.innerHTML = html;
+
+                }}
 
                 async function revisarEstado() {{
 
@@ -1627,6 +1794,10 @@ def iniciar_trabajo(
                             "errores"
                         ).innerText =
                             datos.errores;
+
+                        renderizarActividades(
+                            datos.detalle_actividades
+                        );
 
                         let porcentaje = 0;
 
@@ -1771,6 +1942,12 @@ def estado_trabajo(
 
         "terminado":
             trabajo["terminado"],
+
+        "detalle_actividades":
+            trabajo.get(
+                "detalle_actividades",
+                [],
+            ),
 
         "reporte_disponible":
             os.path.isfile(
