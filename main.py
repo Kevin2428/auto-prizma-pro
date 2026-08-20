@@ -14,7 +14,7 @@ from fastapi.responses import (
 
 from io import BytesIO
 
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 
 from motor_prizma import (
     ejecutar_cargue,
@@ -24,6 +24,7 @@ from motor_prizma import (
 )
 
 import zipfile
+import csv
 import os
 import uuid
 
@@ -77,13 +78,101 @@ TRABAJOS = {}
 
 
 # ============================================================
-# ANALIZAR EXCEL
+# CONVERTIR CSV A XLSX INTERNO
+# ============================================================
+
+def convertir_csv_a_xlsx(
+    contenido_csv,
+):
+
+    texto = None
+
+    for codificacion in [
+        "utf-8-sig",
+        "utf-8",
+        "cp1252",
+        "latin-1",
+    ]:
+
+        try:
+
+            texto = contenido_csv.decode(
+                codificacion
+            )
+
+            break
+
+        except UnicodeDecodeError:
+            continue
+
+    if texto is None:
+        raise ValueError(
+            "No fue posible leer el archivo CSV."
+        )
+
+    muestra = texto[:10000]
+
+    try:
+
+        dialecto = csv.Sniffer().sniff(
+            muestra,
+            delimiters=",;\t|",
+        )
+
+        delimitador = dialecto.delimiter
+
+    except csv.Error:
+
+        delimitador = ","
+
+    filas = list(
+        csv.reader(
+            texto.splitlines(),
+            delimiter=delimitador,
+        )
+    )
+
+    if not filas:
+        raise ValueError(
+            "El archivo CSV está vacío."
+        )
+
+    libro = Workbook()
+
+    hoja = libro.active
+    hoja.title = "Matriz"
+
+    for numero_fila, fila in enumerate(
+        filas,
+        start=1,
+    ):
+
+        for numero_columna, valor in enumerate(
+            fila,
+            start=1,
+        ):
+
+            hoja.cell(
+                row=numero_fila,
+                column=numero_columna,
+                value=valor,
+            )
+
+    salida = BytesIO()
+    libro.save(salida)
+
+    return salida.getvalue()
+
+
+# ============================================================
+# ANALIZAR MATRIZ
 # ============================================================
 
 def analizar_excel(
     contenido_excel,
     procesar_ovi=True,
     procesar_ova=True,
+    procesar_retos=True,
 ):
 
     libro = load_workbook(
@@ -140,6 +229,7 @@ def analizar_excel(
 
         cantidad_ovi = 0
         cantidad_ova = 0
+        cantidad_retos = 0
         cantidad_h5p = 0
         cantidad_pdf = 0
 
@@ -191,6 +281,7 @@ def analizar_excel(
             if categoria_prizma not in [
                 "OVI",
                 "OVA",
+                "CHALLENGE",
             ]:
                 continue
 
@@ -203,6 +294,12 @@ def analizar_excel(
             if (
                 categoria_prizma == "OVA"
                 and not procesar_ova
+            ):
+                continue
+
+            if (
+                categoria_prizma == "CHALLENGE"
+                and not procesar_retos
             ):
                 continue
 
@@ -220,6 +317,9 @@ def analizar_excel(
 
             if categoria_prizma == "OVA":
                 cantidad_ova += 1
+
+            if categoria_prizma == "CHALLENGE":
+                cantidad_retos += 1
 
             if tipo_archivo == "H5P":
                 cantidad_h5p += 1
@@ -280,6 +380,9 @@ def analizar_excel(
 
                 "ova":
                     cantidad_ova,
+
+                "retos":
+                    cantidad_retos,
 
                 "h5p":
                     cantidad_h5p,
@@ -476,6 +579,18 @@ def generar_html(
                     <div class="dato">
 
                         <span>
+                            Retos Evaluativos
+                        </span>
+
+                        <strong>
+                            {hoja["retos"]}
+                        </strong>
+
+                    </div>
+
+                    <div class="dato">
+
+                        <span>
                             H5P
                         </span>
 
@@ -636,19 +751,19 @@ def generar_html(
             <div class="reglas">
 
                 <div>
-                    ✅ OVI y OVA
+                    ✅ OVI, OVA y Retos Evaluativos
                 </div>
 
                 <div>
-                    ✅ H5P y PDF se cargan en Recurso
+                    ✅ OVI/OVA: H5P y PDF se cargan en Recurso
+                </div>
+
+                <div>
+                    ✅ Retos: PDF se carga en Contenido
                 </div>
 
                 <div>
                     🚫 Material descargable no se toca
-                </div>
-
-                <div>
-                    🚫 Retos Evaluativos excluidos
                 </div>
 
                 <div>
@@ -976,13 +1091,13 @@ def generar_html(
                     <div class="campo">
 
                         <label>
-                            Archivo Excel
+                            Matriz de actividades
                         </label>
 
                         <input
                             type="file"
                             name="excel"
-                            accept=".xlsx"
+                            accept=".xlsx,.csv"
                             required
                         >
 
@@ -1037,13 +1152,28 @@ def generar_html(
 
                         </div>
 
+                        <div>
+
+                            <input
+                                id="retos"
+                                type="checkbox"
+                                name="retos"
+                                value="1"
+                                checked
+                            >
+
+                            <label for="retos">
+                                Retos Evaluativos
+                            </label>
+
+                        </div>
+
                     </div>
 
                     <div class="aviso">
 
-                        Retos Evaluativos,
                         Video Intro y Video Cierre
-                        están excluidos.
+                        continúan excluidos.
 
                     </div>
 
@@ -1093,17 +1223,24 @@ async def analizar(
     recursos: UploadFile = File(...),
     ovi: str | None = Form(default=None),
     ova: str | None = Form(default=None),
+    retos: str | None = Form(default=None),
 ):
 
     try:
 
-        if not excel.filename.lower().endswith(
-            ".xlsx"
+        nombre_matriz = (
+            excel.filename
+            or ""
+        ).lower()
+
+        if not nombre_matriz.endswith(
+            (".xlsx", ".csv")
         ):
 
             return generar_html(
                 error=(
-                    "El archivo Excel debe ser .xlsx"
+                    "La matriz debe ser un archivo "
+                    ".xlsx o .csv"
                 )
             )
 
@@ -1126,25 +1263,43 @@ async def analizar(
             ova is not None
         )
 
+        procesar_retos = (
+            retos is not None
+        )
+
         if (
             not procesar_ovi
             and not procesar_ova
+            and not procesar_retos
         ):
 
             return generar_html(
                 error=(
-                    "Selecciona OVI y/o OVA."
+                    "Selecciona OVI, OVA y/o Retos Evaluativos."
                 )
             )
 
-        contenido_excel = await excel.read()
+        contenido_matriz = await excel.read()
 
         contenido_zip = await recursos.read()
+
+        if nombre_matriz.endswith(
+            ".csv"
+        ):
+
+            contenido_excel = convertir_csv_a_xlsx(
+                contenido_matriz
+            )
+
+        else:
+
+            contenido_excel = contenido_matriz
 
         hojas = analizar_excel(
             contenido_excel,
             procesar_ovi,
             procesar_ova,
+            procesar_retos,
         )
 
         if not hojas:
@@ -1252,6 +1407,9 @@ async def analizar(
 
             "procesar_ova":
                 procesar_ova,
+
+            "procesar_retos":
+                procesar_retos,
 
             "etapa":
                 "analizado",
@@ -1399,6 +1557,7 @@ def iniciar_trabajo(
         trabajo["ruta_reporte"],
         trabajo["procesar_ovi"],
         trabajo["procesar_ova"],
+        trabajo["procesar_retos"],
         usuario_prizma,
         contrasena_prizma,
         trabajo,

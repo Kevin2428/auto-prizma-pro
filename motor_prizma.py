@@ -22,7 +22,7 @@ URL_PRIZMA = "https://admin.prizma.site/inicio-sesion"
 
 VERSION_SCRIPT = "PRUEBA_H5P_NUEVO_GESTION_FINANCIERA_V2"
 
-BUILD_INTERNO = "INTERFAZ_WEB_LOGIN_AUTOMATICO_03"
+BUILD_INTERNO = "INTERFAZ_WEB_RETOS_EVALUATIVOS_01"
 
 
 TEXTOS_DESCRIPCION_A_BORRAR = [
@@ -165,6 +165,9 @@ def normalizar_categoria(categoria):
 
     if valor == "ova":
         return "OVA"
+
+    if valor == "challenge":
+        return "CHALLENGE"
 
     return None
 
@@ -365,12 +368,20 @@ def determinar_tipo_archivo(
         enlace
     )
 
-    # SOLO OVI / OVA
+    # OVI / OVA / RETO EVALUATIVO
     if categoria_n not in [
         "ovi",
         "ova",
+        "challenge",
     ]:
         return None
+
+    # RETO EVALUATIVO SIEMPRE PDF
+    if (
+        categoria_n == "challenge"
+        and tipo_n == "reto evaluativo"
+    ):
+        return "PDF"
 
     # VIDEOS EXCLUIDOS
     if tipo_n in [
@@ -413,6 +424,7 @@ def leer_actividades_excel(
     ruta_excel,
     procesar_ovi=True,
     procesar_ova=True,
+    procesar_retos=True,
 ):
 
     libro = load_workbook(
@@ -530,10 +542,10 @@ def leer_actividades_excel(
                 categoria
             )
 
-            # RETOS / CHALLENGE / OTRAS CATEGORÍAS
             if categoria_prizma not in [
                 "OVI",
                 "OVA",
+                "CHALLENGE",
             ]:
                 continue
 
@@ -546,6 +558,12 @@ def leer_actividades_excel(
             if (
                 categoria_prizma == "OVA"
                 and not procesar_ova
+            ):
+                continue
+
+            if (
+                categoria_prizma == "CHALLENGE"
+                and not procesar_retos
             ):
                 continue
 
@@ -1272,11 +1290,17 @@ def entrar_categoria(
     categoria,
 ):
 
-    if categoria not in [
-        "OVI",
-        "OVA",
-    ]:
+    nombres_pestana = {
+        "OVI": "OVI",
+        "OVA": "OVA",
+        "CHALLENGE": "Retos Evaluativos",
+    }
 
+    texto_pestana = nombres_pestana.get(
+        categoria
+    )
+
+    if not texto_pestana:
         return False
 
     try:
@@ -1287,7 +1311,7 @@ def entrar_categoria(
 
         pestana = pagina.locator(
             "label.tab",
-            has_text=categoria,
+            has_text=texto_pestana,
         ).first
 
         pestana.wait_for(
@@ -1506,6 +1530,15 @@ def analizar_resultados_pagina(
             cumple_categoria = (
                 "ova" in texto_n
             )
+
+        elif actividad[
+            "categoria_prizma"
+        ] == "CHALLENGE":
+
+            # En Retos Evaluativos la fila no muestra la categoría
+            # dentro de su texto. La categoría ya quedó validada al
+            # entrar explícitamente a la pestaña Retos Evaluativos.
+            cumple_categoria = True
 
         else:
 
@@ -2372,6 +2405,261 @@ def limpiar_descripcion(
 
 
 # ============================================================
+# RETOS EVALUATIVOS
+# ============================================================
+
+def es_programa_posgrado(
+    programa,
+):
+
+    programa_n = normalizar_texto(
+        programa
+    )
+
+    return (
+        programa_n.startswith(
+            "especializacion "
+        )
+        or programa_n == "especializacion"
+        or programa_n.startswith(
+            "esp "
+        )
+        or programa_n == "esp"
+        or programa_n.startswith(
+            "maestria "
+        )
+        or programa_n == "maestria"
+    )
+
+
+def obtener_numero_unidad(
+    unidad,
+):
+
+    unidad_n = normalizar_texto(
+        unidad
+    )
+
+    coincidencia = re.search(
+        r"\b(\d+)\b",
+        unidad_n,
+    )
+
+    if not coincidencia:
+        return None
+
+    return int(
+        coincidencia.group(1)
+    )
+
+
+def obtener_configuracion_reto(
+    actividad,
+):
+
+    numero_unidad = obtener_numero_unidad(
+        actividad.get(
+            "unidad",
+            "",
+        )
+    )
+
+    if numero_unidad is None:
+        return (
+            None,
+            "ERROR_UNIDAD_RETO_NO_RECONOCIDA",
+        )
+
+    posgrado = es_programa_posgrado(
+        actividad.get(
+            "programa",
+            "",
+        )
+    )
+
+    if posgrado:
+
+        reglas = {
+            1: (
+                "Corte 1",
+                "Nivel intermedio",
+            ),
+            2: (
+                "Corte 1",
+                "Nivel intermedio",
+            ),
+            3: (
+                "Corte 1",
+                "Nivel avanzado",
+            ),
+            4: (
+                "Corte 1",
+                "Nivel avanzado",
+            ),
+        }
+
+    else:
+
+        reglas = {
+            1: (
+                "Corte 1",
+                "Nivel básico",
+            ),
+            2: (
+                "Corte 2",
+                "Nivel intermedio",
+            ),
+            3: (
+                "Corte 3",
+                "Nivel avanzado",
+            ),
+        }
+
+    configuracion = reglas.get(
+        numero_unidad
+    )
+
+    if configuracion is None:
+
+        if posgrado:
+            return (
+                None,
+                "ERROR_UNIDAD_POSGRADO_NO_SOPORTADA",
+            )
+
+        return (
+            None,
+            "ERROR_UNIDAD_PREGRADO_NO_SOPORTADA",
+        )
+
+    return (
+        {
+            "corte": configuracion[0],
+            "nivel": configuracion[1],
+            "posgrado": posgrado,
+            "numero_unidad": numero_unidad,
+        },
+        None,
+    )
+
+
+def seleccionar_autocomplete_reto(
+    pagina,
+    placeholder,
+    valor,
+):
+
+    campo = pagina.locator(
+        f'input[placeholder="{placeholder}"]'
+    )
+
+    if campo.count() != 1:
+        return False
+
+    campo = campo.first
+
+    try:
+
+        campo.wait_for(
+            state="visible",
+            timeout=10000,
+        )
+
+        campo.click(
+            timeout=10000
+        )
+
+        pagina.wait_for_timeout(
+            500
+        )
+
+        opcion = pagina.get_by_role(
+            "option",
+            name=valor,
+            exact=True,
+        )
+
+        if opcion.count() != 1:
+
+            pagina.keyboard.press(
+                "Escape"
+            )
+
+            return False
+
+        opcion.first.click(
+            timeout=10000
+        )
+
+        pagina.wait_for_timeout(
+            500
+        )
+
+        valor_final = normalizar_texto(
+            campo.input_value()
+        )
+
+        return (
+            valor_final
+            == normalizar_texto(
+                valor
+            )
+        )
+
+    except Exception:
+
+        try:
+            pagina.keyboard.press(
+                "Escape"
+            )
+        except Exception:
+            pass
+
+        return False
+
+
+def detectar_campo_contenido_reto(
+    pagina,
+):
+
+    archivos = pagina.locator(
+        'input[type="file"]'
+    )
+
+    candidatos = []
+
+    for i in range(
+        archivos.count()
+    ):
+
+        try:
+
+            archivo = archivos.nth(i)
+
+            accept = (
+                archivo.get_attribute(
+                    "accept"
+                )
+                or ""
+            ).lower()
+
+            if ".pdf" not in accept:
+                continue
+
+            candidatos.append(
+                archivo
+            )
+
+        except Exception:
+            pass
+
+    if len(candidatos) != 1:
+        return None
+
+    return candidatos[0]
+
+
+# ============================================================
 # BOTÓN GUARDAR
 # ============================================================
 
@@ -2774,34 +3062,122 @@ def procesar_actividad(
                 nombre_recurso,
         }
 
-    # 6. CAMPO RECURSO
+    # 6. PREPARAR CAMPOS SEGÚN CATEGORÍA
 
-    campo_recurso = detectar_campo_recurso(
-        pagina
-    )
+    if actividad[
+        "categoria_prizma"
+    ] == "CHALLENGE":
 
-    if campo_recurso is None:
+        configuracion_reto, error_reto = (
+            obtener_configuracion_reto(
+                actividad
+            )
+        )
 
-        cancelar_edicion_segura(
+        if error_reto:
+
+            cancelar_edicion_segura(
+                pagina
+            )
+
+            return {
+                "ok": False,
+                "error": error_reto,
+                "recurso": nombre_recurso,
+            }
+
+        if not seleccionar_autocomplete_reto(
+            pagina,
+            "Corte",
+            configuracion_reto["corte"],
+        ):
+
+            cancelar_edicion_segura(
+                pagina
+            )
+
+            return {
+                "ok": False,
+                "error":
+                    "ERROR_SELECCIONANDO_CORTE",
+                "recurso": nombre_recurso,
+            }
+
+        if not seleccionar_autocomplete_reto(
+            pagina,
+            "Nivel de dificultad",
+            configuracion_reto["nivel"],
+        ):
+
+            cancelar_edicion_segura(
+                pagina
+            )
+
+            return {
+                "ok": False,
+                "error":
+                    "ERROR_SELECCIONANDO_NIVEL_DIFICULTAD",
+                "recurso": nombre_recurso,
+            }
+
+        campo_recurso = detectar_campo_contenido_reto(
             pagina
         )
 
-        return {
-            "ok": False,
-            "error":
-                "ERROR_CAMPO_RECURSO_NO_ENCONTRADO",
-            "recurso":
-                nombre_recurso,
-        }
+        if campo_recurso is None:
 
-    print()
-    print(
-        "✅ El archivo será cargado en RECURSO."
-    )
+            cancelar_edicion_segura(
+                pagina
+            )
 
-    print(
-        "Material descargable: IGNORADO"
-    )
+            return {
+                "ok": False,
+                "error":
+                    "ERROR_CAMPO_CONTENIDO_RETO_NO_ENCONTRADO",
+                "recurso": nombre_recurso,
+            }
+
+        print()
+        print(
+            "✅ Corte:",
+            configuracion_reto["corte"],
+        )
+        print(
+            "✅ Nivel:",
+            configuracion_reto["nivel"],
+        )
+        print(
+            "✅ El PDF será cargado en CONTENIDO."
+        )
+
+    else:
+
+        campo_recurso = detectar_campo_recurso(
+            pagina
+        )
+
+        if campo_recurso is None:
+
+            cancelar_edicion_segura(
+                pagina
+            )
+
+            return {
+                "ok": False,
+                "error":
+                    "ERROR_CAMPO_RECURSO_NO_ENCONTRADO",
+                "recurso":
+                    nombre_recurso,
+            }
+
+        print()
+        print(
+            "✅ El archivo será cargado en RECURSO."
+        )
+
+        print(
+            "Material descargable: IGNORADO"
+        )
 
     # 7. DESCRIPCIÓN
 
@@ -3022,6 +3398,7 @@ def ejecutar_cargue(
     ruta_reporte,
     procesar_ovi,
     procesar_ova,
+    procesar_retos,
     usuario_prizma,
     contrasena_prizma,
     estado,
@@ -3091,6 +3468,7 @@ def ejecutar_cargue(
             ruta_excel,
             procesar_ovi,
             procesar_ova,
+            procesar_retos,
         )
 
         if not actividades:
@@ -3100,7 +3478,7 @@ def ejecutar_cargue(
                 etapa="error",
                 mensaje=(
                     "No se encontraron actividades "
-                    "OVI/OVA compatibles."
+                    "OVI/OVA/Retos compatibles."
                 ),
                 terminado=True,
             )
