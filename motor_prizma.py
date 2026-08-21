@@ -193,23 +193,43 @@ def obtener_variantes_programa(
 
     partes = programa_n.split()
 
-    # Ejemplo:
-    # "Esp. en Contratación estatal"
-    # -> "especializacion en contratacion estatal"
-    if partes and partes[0] == "esp":
+    # PRIZMA y las matrices no siempre usan exactamente el mismo
+    # prefijo para las especializaciones. Ejemplos reales:
+    #   Matriz:  "Esp en Crisis, Conflicto..."
+    #   PRIZMA:  "Especialización Crisis, Conflicto... - Virtual"
+    #
+    # Generamos únicamente variantes equivalentes del prefijo, sin
+    # relajar la comparación del nombre propio del programa.
+    if partes and partes[0] in {"esp", "especializacion"}:
 
-        resto = " ".join(
-            partes[1:]
-        )
+        resto_partes = partes[1:]
 
-        variante = "especializacion"
+        if resto_partes:
+            resto = " ".join(resto_partes)
+            variantes.add(
+                "especializacion " + resto
+            )
 
-        if resto:
-            variante += " " + resto
+            if resto_partes[0] == "en":
+                resto_sin_en = " ".join(
+                    resto_partes[1:]
+                )
 
-        variantes.add(
-            variante
-        )
+                if resto_sin_en:
+                    variantes.add(
+                        "especializacion "
+                        + resto_sin_en
+                    )
+                    variantes.add(
+                        "esp " + resto_sin_en
+                    )
+            else:
+                variantes.add(
+                    "especializacion en " + resto
+                )
+                variantes.add(
+                    "esp en " + resto
+                )
 
     return variantes
 
@@ -1819,6 +1839,76 @@ def asegurar_pagina_1(
 
 
 # ============================================================
+# TÉRMINOS DE BÚSQUEDA PARA RETOS
+# ============================================================
+
+def obtener_terminos_busqueda_reto(
+    nombre,
+):
+
+    nombre_original = str(
+        nombre or ""
+    ).strip()
+
+    if not nombre_original:
+        return []
+
+    terminos = [
+        nombre_original
+    ]
+
+    nombre_n = normalizar_texto(
+        nombre_original
+    )
+
+    # Algunos Retos Evaluativos no aparecen cuando el buscador de
+    # PRIZMA recibe el título completo. Como fallback usamos frases
+    # más cortas, pero la aceptación de la fila sigue siendo EXACTA
+    # en analizar_resultados_pagina().
+    palabras = [
+        palabra
+        for palabra in nombre_n.split()
+        if len(palabra) >= 4
+        and palabra not in {
+            "analisis",
+            "modelo",
+            "modelos",
+            "sobre",
+            "para",
+            "entre",
+            "desde",
+        }
+    ]
+
+    if palabras:
+        # Preferimos las últimas palabras porque suelen ser las más
+        # distintivas del reto (p. ej. "modelo de Piaget").
+        frase_final = " ".join(
+            palabras[-3:]
+        )
+
+        if (
+            frase_final
+            and frase_final not in terminos
+        ):
+            terminos.append(
+                frase_final
+            )
+
+        ultima = palabras[-1]
+
+        if (
+            len(ultima) >= 5
+            and ultima not in terminos
+        ):
+            terminos.append(
+                ultima
+            )
+
+    return terminos
+
+
+# ============================================================
 # BUSCAR ACTIVIDAD
 # ============================================================
 
@@ -1862,134 +1952,183 @@ def buscar_actividad_correcta(
         timeout=30000,
     )
 
-    buscador.fill("")
+    if actividad[
+        "categoria_prizma"
+    ] == "CHALLENGE":
 
-    pagina.wait_for_timeout(
-        500
-    )
+        terminos_busqueda = (
+            obtener_terminos_busqueda_reto(
+                actividad["nombre"]
+            )
+        )
 
-    asegurar_pagina_1(
-        pagina
-    )
+    else:
 
-    buscador.fill(
-        actividad["nombre"]
-    )
-
-    pagina.wait_for_timeout(
-        1800
-    )
-
-    asegurar_pagina_1(
-        pagina
-    )
-
-    pagina.wait_for_timeout(
-        700
-    )
+        terminos_busqueda = [
+            actividad["nombre"]
+        ]
 
     coincidencias = []
+    claves_coincidencias = set()
+    termino_encontrado = None
 
-    firmas_visitadas = set()
-
-    numero_logico = 1
-
-    while numero_logico <= 50:
-
-        firma_actual = obtener_firma_pagina(
-            pagina,
-            actividad,
-        )
-
-        if firma_actual in firmas_visitadas:
-            break
-
-        firmas_visitadas.add(
-            firma_actual
-        )
-
-        resultados = analizar_resultados_pagina(
-            pagina,
-            actividad,
-        )
+    for termino_busqueda in terminos_busqueda:
 
         print(
-            "Página",
-            numero_logico,
-            "- candidatos:",
-            len(resultados),
+            "Término de búsqueda:",
+            termino_busqueda,
         )
 
-        for resultado in resultados:
+        buscador.fill("")
 
-            if resultado[
-                "coincide"
-            ]:
-
-                coincidencias.append(
-                    {
-                        "pagina":
-                            numero_logico,
-
-                        "texto":
-                            resultado["texto"],
-                    }
-                )
-
-        siguiente_numero = (
-            numero_logico + 1
+        pagina.wait_for_timeout(
+            500
         )
 
-        paginas = obtener_paginas_numericas(
+        asegurar_pagina_1(
             pagina
         )
 
-        if siguiente_numero in paginas:
+        buscador.fill(
+            termino_busqueda
+        )
 
-            if ir_a_pagina_numero(
+        pagina.wait_for_timeout(
+            1800
+        )
+
+        asegurar_pagina_1(
+            pagina
+        )
+
+        pagina.wait_for_timeout(
+            700
+        )
+
+        coincidencias_intento = []
+        firmas_visitadas = set()
+        numero_logico = 1
+
+        while numero_logico <= 50:
+
+            firma_actual = obtener_firma_pagina(
                 pagina,
-                siguiente_numero,
-            ):
+                actividad,
+            )
 
-                firma_nueva = obtener_firma_pagina(
+            if firma_actual in firmas_visitadas:
+                break
+
+            firmas_visitadas.add(
+                firma_actual
+            )
+
+            resultados = analizar_resultados_pagina(
+                pagina,
+                actividad,
+            )
+
+            print(
+                "Página",
+                numero_logico,
+                "- candidatos:",
+                len(resultados),
+            )
+
+            for resultado in resultados:
+
+                if resultado[
+                    "coincide"
+                ]:
+
+                    clave = (
+                        numero_logico,
+                        normalizar_texto(
+                            resultado["texto"]
+                        ),
+                    )
+
+                    if clave not in claves_coincidencias:
+                        claves_coincidencias.add(
+                            clave
+                        )
+                        coincidencia = {
+                            "pagina":
+                                numero_logico,
+
+                            "texto":
+                                resultado["texto"],
+
+                            "termino":
+                                termino_busqueda,
+                        }
+                        coincidencias.append(
+                            coincidencia
+                        )
+                        coincidencias_intento.append(
+                            coincidencia
+                        )
+
+            siguiente_numero = (
+                numero_logico + 1
+            )
+
+            paginas = obtener_paginas_numericas(
+                pagina
+            )
+
+            if siguiente_numero in paginas:
+
+                if ir_a_pagina_numero(
                     pagina,
-                    actividad,
+                    siguiente_numero,
+                ):
+
+                    firma_nueva = obtener_firma_pagina(
+                        pagina,
+                        actividad,
+                    )
+
+                    if firma_nueva != firma_actual:
+
+                        numero_logico += 1
+                        continue
+
+            siguiente = encontrar_boton_siguiente(
+                pagina
+            )
+
+            if siguiente is None:
+                break
+
+            try:
+
+                siguiente.click(
+                    timeout=5000
                 )
 
-                if firma_nueva != firma_actual:
+                pagina.wait_for_timeout(
+                    1200
+                )
 
-                    numero_logico += 1
-                    continue
+            except Exception:
+                break
 
-        siguiente = encontrar_boton_siguiente(
-            pagina
-        )
-
-        if siguiente is None:
-            break
-
-        try:
-
-            siguiente.click(
-                timeout=5000
+            firma_nueva = obtener_firma_pagina(
+                pagina,
+                actividad,
             )
 
-            pagina.wait_for_timeout(
-                1200
-            )
+            if firma_nueva == firma_actual:
+                break
 
-        except Exception:
+            numero_logico += 1
+
+        # Si el término actual ya encontró la coincidencia exacta,
+        # no necesitamos ampliar la búsqueda del reto.
+        if coincidencias_intento:
+            termino_encontrado = termino_busqueda
             break
-
-        firma_nueva = obtener_firma_pagina(
-            pagina,
-            actividad,
-        )
-
-        if firma_nueva == firma_actual:
-            break
-
-        numero_logico += 1
 
     print(
         "Coincidencias exactas:",
@@ -2015,6 +2154,24 @@ def buscar_actividad_correcta(
     ][
         "pagina"
     ]
+
+    # Para recuperar la misma vista debemos conservar el término que
+    # produjo la coincidencia, especialmente en el fallback de Retos.
+    if termino_encontrado is None:
+        termino_encontrado = coincidencias[
+            0
+        ].get(
+            "termino",
+            actividad["nombre"],
+        )
+
+    buscador.fill("")
+    pagina.wait_for_timeout(500)
+    asegurar_pagina_1(pagina)
+    buscador.fill(termino_encontrado)
+    pagina.wait_for_timeout(1800)
+    asegurar_pagina_1(pagina)
+    pagina.wait_for_timeout(700)
 
     # --------------------------------------------------------
     # RECUPERAR PÁGINA
