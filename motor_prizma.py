@@ -1839,8 +1839,72 @@ def asegurar_pagina_1(
 
 
 # ============================================================
-# TÉRMINOS DE BÚSQUEDA PARA RETOS
+# TÉRMINOS DE BÚSQUEDA
 # ============================================================
+
+def obtener_terminos_busqueda_general(
+    nombre,
+):
+
+    nombre_original = str(
+        nombre or ""
+    ).strip()
+
+    if not nombre_original:
+        return []
+
+    terminos = [
+        nombre_original
+    ]
+
+    nombre_n = normalizar_texto(
+        nombre_original
+    )
+
+    palabras = [
+        palabra
+        for palabra in nombre_n.split()
+        if len(palabra) >= 3
+        and palabra not in {
+            "del", "las", "los", "una", "uno",
+            "para", "por", "con", "sin", "desde",
+            "entre", "sobre", "sus", "que", "como",
+        }
+    ]
+
+    # PRIZMA a veces no devuelve registros con el título completo,
+    # pero sí con una frase corta del mismo nombre. La fila SOLO se
+    # acepta después si nombre + semana + unidad + programa + categoría
+    # coinciden exactamente, así que estos términos amplían la búsqueda
+    # sin volverla ambigua.
+    candidatos = []
+
+    if len(palabras) >= 2:
+        candidatos.append(
+            " ".join(palabras[-2:])
+        )
+
+    if len(palabras) >= 4:
+        medio = max(0, len(palabras) // 2 - 1)
+        candidatos.append(
+            " ".join(palabras[medio:medio + 2])
+        )
+
+    if len(palabras) >= 2:
+        candidatos.append(
+            " ".join(palabras[:2])
+        )
+
+    for candidato in candidatos:
+        if (
+            candidato
+            and normalizar_texto(candidato) != nombre_n
+            and candidato not in terminos
+        ):
+            terminos.append(candidato)
+
+    return terminos
+
 
 def obtener_terminos_busqueda_reto(
     nombre,
@@ -1964,9 +2028,11 @@ def buscar_actividad_correcta(
 
     else:
 
-        terminos_busqueda = [
-            actividad["nombre"]
-        ]
+        terminos_busqueda = (
+            obtener_terminos_busqueda_general(
+                actividad["nombre"]
+            )
+        )
 
     coincidencias = []
     claves_coincidencias = set()
@@ -1994,7 +2060,7 @@ def buscar_actividad_correcta(
         )
 
         pagina.wait_for_timeout(
-            1800
+            2600
         )
 
         asegurar_pagina_1(
@@ -2149,12 +2215,6 @@ def buscar_actividad_correcta(
             "ERROR_ACTIVIDAD_DUPLICADA",
         )
 
-    pagina_objetivo = coincidencias[
-        0
-    ][
-        "pagina"
-    ]
-
     # Para recuperar la misma vista debemos conservar el término que
     # produjo la coincidencia, especialmente en el fallback de Retos.
     if termino_encontrado is None:
@@ -2165,6 +2225,16 @@ def buscar_actividad_correcta(
             actividad["nombre"],
         )
 
+    # --------------------------------------------------------
+    # RECUPERAR FILA POR ESCANEO REAL
+    # --------------------------------------------------------
+    # Antes intentábamos regresar a un número lógico de página. En
+    # Retos Evaluativos la paginación puede reordenarse o cambiar al
+    # refrescar el filtro, provocando ERROR_RECUPERANDO_PAGINA/FILA.
+    # Ahora repetimos el mismo filtro y recorremos las páginas hasta
+    # volver a encontrar la coincidencia exacta. La validación sigue
+    # siendo estricta: nombre + semana + unidad + programa + categoría.
+
     buscador.fill("")
     pagina.wait_for_timeout(500)
     asegurar_pagina_1(pagina)
@@ -2173,103 +2243,104 @@ def buscar_actividad_correcta(
     asegurar_pagina_1(pagina)
     pagina.wait_for_timeout(700)
 
-    # --------------------------------------------------------
-    # RECUPERAR PÁGINA
-    # --------------------------------------------------------
+    firmas_recuperacion = set()
+    numero_recuperacion = 1
 
-    if not ir_a_pagina_numero(
-        pagina,
-        pagina_objetivo,
-    ):
+    while numero_recuperacion <= 50:
 
-        asegurar_pagina_1(
+        firma_actual = obtener_firma_pagina(
+            pagina,
+            actividad,
+        )
+
+        if firma_actual in firmas_recuperacion:
+            break
+
+        firmas_recuperacion.add(
+            firma_actual
+        )
+
+        resultados_finales = analizar_resultados_pagina(
+            pagina,
+            actividad,
+        )
+
+        finales = [
+            resultado
+            for resultado in resultados_finales
+            if resultado["coincide"]
+        ]
+
+        if len(finales) > 1:
+            return (
+                None,
+                "ERROR_ACTIVIDAD_DUPLICADA",
+            )
+
+        if len(finales) == 1:
+            print(
+                "✅ Fila recuperada por escaneo."
+            )
+
+            return (
+                finales[0]["fila"],
+                None,
+            )
+
+        siguiente_numero = (
+            numero_recuperacion + 1
+        )
+
+        paginas = obtener_paginas_numericas(
             pagina
         )
 
-        pagina_actual = 1
+        avanzo = False
 
-        while pagina_actual < pagina_objetivo:
-
-            siguiente_numero = (
-                pagina_actual + 1
-            )
-
-            if ir_a_pagina_numero(
+        if siguiente_numero in paginas:
+            avanzo = ir_a_pagina_numero(
                 pagina,
                 siguiente_numero,
-            ):
+            )
 
-                pagina_actual += 1
-                continue
-
+        if not avanzo:
             siguiente = encontrar_boton_siguiente(
                 pagina
             )
 
             if siguiente is None:
-
-                return (
-                    None,
-                    "ERROR_RECUPERANDO_PAGINA",
-                )
+                break
 
             try:
-
                 siguiente.click(
                     timeout=5000
                 )
-
                 pagina.wait_for_timeout(
                     1200
                 )
-
-                pagina_actual += 1
-
+                avanzo = True
             except Exception:
-
                 return (
                     None,
                     "ERROR_RECUPERANDO_PAGINA",
                 )
 
-    pagina.wait_for_timeout(
-        700
-    )
+        if not avanzo:
+            break
 
-    resultados_finales = analizar_resultados_pagina(
-        pagina,
-        actividad,
-    )
-
-    finales = [
-        resultado
-        for resultado in resultados_finales
-        if resultado[
-            "coincide"
-        ]
-    ]
-
-    if len(finales) == 0:
-
-        return (
-            None,
-            "ERROR_RECUPERANDO_FILA",
+        firma_nueva = obtener_firma_pagina(
+            pagina,
+            actividad,
         )
 
-    if len(finales) > 1:
+        if firma_nueva == firma_actual:
+            break
 
-        return (
-            None,
-            "ERROR_ACTIVIDAD_DUPLICADA",
-        )
-
-    print(
-        "✅ Fila recuperada."
-    )
+        numero_recuperacion += 1
 
     return (
-        finales[0]["fila"],
         None,
+        "ERROR_RECUPERANDO_FILA",
     )
 
 
@@ -2714,56 +2785,143 @@ def seleccionar_autocomplete_reto(
         return False
 
     campo = campo.first
+    valor_n = normalizar_texto(
+        valor
+    )
 
-    try:
+    # Los autocompletes MUI de PRIZMA a veces tardan en montar sus
+    # opciones. Hacemos hasta 3 intentos, pero solo aceptamos una
+    # opción cuyo texto normalizado coincida EXACTAMENTE con el valor
+    # esperado. Nunca elegimos la primera opción a ciegas.
+    for intento in range(1, 4):
 
-        campo.wait_for(
-            state="visible",
-            timeout=10000,
-        )
-
-        campo.click(
-            timeout=10000
-        )
-
-        pagina.wait_for_timeout(
-            500
-        )
-
-        opcion = pagina.get_by_role(
-            "option",
-            name=valor,
-            exact=True,
-        )
-
-        if opcion.count() != 1:
-
-            pagina.keyboard.press(
-                "Escape"
+        try:
+            campo.wait_for(
+                state="visible",
+                timeout=10000,
             )
 
-            return False
+            # Si el valor ya quedó seleccionado por un intento previo,
+            # no lo tocamos nuevamente.
+            try:
+                valor_actual = normalizar_texto(
+                    campo.input_value()
+                )
+                if valor_actual == valor_n:
+                    return True
+            except Exception:
+                pass
 
-        opcion.first.click(
-            timeout=10000
-        )
-
-        pagina.wait_for_timeout(
-            500
-        )
-
-        valor_final = normalizar_texto(
-            campo.input_value()
-        )
-
-        return (
-            valor_final
-            == normalizar_texto(
-                valor
+            campo.click(
+                timeout=10000
             )
-        )
 
-    except Exception:
+            pagina.wait_for_timeout(
+                500 + (intento * 300)
+            )
+
+            opciones = pagina.locator(
+                '[role="option"]'
+            )
+
+            candidatas = []
+
+            for indice in range(
+                opciones.count()
+            ):
+                try:
+                    opcion = opciones.nth(
+                        indice
+                    )
+
+                    if not opcion.is_visible():
+                        continue
+
+                    texto_opcion = normalizar_texto(
+                        opcion.inner_text()
+                    )
+
+                    if texto_opcion == valor_n:
+                        candidatas.append(
+                            opcion
+                        )
+                except Exception:
+                    pass
+
+            if len(candidatas) == 1:
+                candidatas[0].click(
+                    timeout=10000
+                )
+
+                pagina.wait_for_timeout(
+                    700
+                )
+
+                valor_final = normalizar_texto(
+                    campo.input_value()
+                )
+
+                if valor_final == valor_n:
+                    return True
+
+            # Algunos MUI filtran las opciones solamente cuando el
+            # input recibe texto. Lo intentamos sin relajar la igualdad.
+            try:
+                campo.fill(
+                    valor
+                )
+
+                pagina.wait_for_timeout(
+                    800
+                )
+
+                opciones = pagina.locator(
+                    '[role="option"]'
+                )
+
+                candidatas = []
+
+                for indice in range(
+                    opciones.count()
+                ):
+                    try:
+                        opcion = opciones.nth(
+                            indice
+                        )
+
+                        if not opcion.is_visible():
+                            continue
+
+                        if normalizar_texto(
+                            opcion.inner_text()
+                        ) == valor_n:
+                            candidatas.append(
+                                opcion
+                            )
+                    except Exception:
+                        pass
+
+                if len(candidatas) == 1:
+                    candidatas[0].click(
+                        timeout=10000
+                    )
+
+                    pagina.wait_for_timeout(
+                        700
+                    )
+
+                    valor_final = normalizar_texto(
+                        campo.input_value()
+                    )
+
+                    if valor_final == valor_n:
+                        return True
+
+            except Exception:
+                pass
+
+        except Exception:
+            pass
 
         try:
             pagina.keyboard.press(
@@ -2772,7 +2930,11 @@ def seleccionar_autocomplete_reto(
         except Exception:
             pass
 
-        return False
+        pagina.wait_for_timeout(
+            350
+        )
+
+    return False
 
 
 def detectar_campo_contenido_reto(
@@ -3694,7 +3856,10 @@ def ejecutar_cargue(
         with sync_playwright() as p:
 
             navegador = p.chromium.launch(
-                headless=True
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                ],
             )
 
             pagina = navegador.new_page(
@@ -3827,33 +3992,118 @@ def ejecutar_cargue(
                         traceback.format_exc()
                     )
 
+                    mensaje_excepcion = str(e)
+                    pagina_caida = (
+                        "Page crashed" in mensaje_excepcion
+                        or "Target page, context or browser has been closed"
+                        in mensaje_excepcion
+                    )
+
                     resultado = {
                         "ok": False,
 
                         "error":
                             "ERROR_NO_CONTROLADO: "
-                            + str(e),
+                            + mensaje_excepcion,
 
                         "recurso": "",
                     }
 
-                    try:
+                    if pagina_caida:
 
-                        cancelar_edicion_segura(
-                            pagina
+                        print()
+                        print(
+                            "⚠️ Chromium/PRIZMA se cayó. "
+                            "Intentando recuperar la sesión y "
+                            "reintentar la actividad una vez..."
                         )
 
-                    except Exception:
-                        pass
-
-                    try:
-
-                        asegurar_listado(
-                            pagina
+                        actualizar_estado(
+                            estado,
+                            mensaje=(
+                                "El navegador se reinició durante "
+                                "el cargue. Recuperando PRIZMA y "
+                                "reintentando la actividad actual..."
+                            ),
                         )
 
-                    except Exception:
-                        pass
+                        try:
+
+                            try:
+                                navegador.close()
+                            except Exception:
+                                pass
+
+                            navegador = p.chromium.launch(
+                                headless=True,
+                                args=[
+                                    "--disable-dev-shm-usage",
+                                ],
+                            )
+
+                            pagina = navegador.new_page(
+                                viewport={
+                                    "width": 1440,
+                                    "height": 900,
+                                }
+                            )
+
+                            pagina.on(
+                                "response",
+                                registrar_respuesta,
+                            )
+
+                            iniciar_sesion_prizma(
+                                pagina,
+                                usuario_prizma,
+                                contrasena_prizma,
+                            )
+
+                            resultado = procesar_actividad(
+                                pagina,
+                                actividad,
+                                indice_recursos,
+                                carpeta_temp,
+                                respuestas,
+                                captura,
+                                actividades_a_procesar,
+                            )
+
+                        except Exception as e_reintento:
+
+                            print()
+                            print(
+                                traceback.format_exc()
+                            )
+
+                            resultado = {
+                                "ok": False,
+                                "error": (
+                                    "ERROR_RECUPERANDO_TRAS_PAGE_CRASH: "
+                                    + str(e_reintento)
+                                ),
+                                "recurso": "",
+                            }
+
+                    else:
+
+                        try:
+
+                            cancelar_edicion_segura(
+                                pagina
+                            )
+
+                        except Exception:
+                            pass
+
+                        try:
+
+                            asegurar_listado(
+                                pagina
+                            )
+
+                        except Exception:
+                            pass
 
                 procesadas += 1
 
@@ -3945,9 +4195,21 @@ def ejecutar_cargue(
                 except Exception:
                     pass
 
-                pagina.wait_for_timeout(
-                    700
-                )
+                try:
+                    pagina.wait_for_timeout(
+                        700
+                    )
+                except Exception as e_espera:
+                    if "Page crashed" in str(e_espera):
+                        print(
+                            "⚠️ La página cayó al finalizar una actividad; "
+                            "se recuperará en la siguiente iteración si es necesario."
+                        )
+                    else:
+                        print(
+                            "⚠️ No fue posible realizar la espera entre actividades:",
+                            str(e_espera),
+                        )
 
             navegador.close()
 
