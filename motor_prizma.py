@@ -12,6 +12,7 @@ import zipfile
 import unicodedata
 import shutil
 import traceback
+import time
 
 
 # ============================================================
@@ -22,7 +23,7 @@ URL_PRIZMA = "https://admin.prizma.site/inicio-sesion"
 
 VERSION_SCRIPT = "PRUEBA_H5P_NUEVO_GESTION_FINANCIERA_V2"
 
-BUILD_INTERNO = "INTERFAZ_WEB_RETOS_EVALUATIVOS_01"
+BUILD_INTERNO = "ESTABILIDAD_COLA_CANCELACION_V10"
 
 
 TEXTOS_DESCRIPCION_A_BORRAR = [
@@ -3094,6 +3095,162 @@ def esperar_patch(
 # LOGIN AUTOMÁTICO
 # ============================================================
 
+
+def validar_credenciales_prizma(
+    usuario_prizma,
+    contrasena_prizma,
+    timeout_ms=30000,
+):
+    """Valida credenciales sin iniciar un cargue.
+
+    Retorna un dict con ok/tipo/mensaje para distinguir credenciales
+    rechazadas de una indisponibilidad técnica de PRIZMA.
+    """
+    usuario_prizma = str(usuario_prizma or "").strip()
+    contrasena_prizma = str(contrasena_prizma or "")
+
+    if not usuario_prizma or not contrasena_prizma:
+        return {
+            "ok": False,
+            "tipo": "credenciales",
+            "mensaje": "Debes ingresar usuario y contraseña de PRIZMA.",
+        }
+
+    try:
+        with sync_playwright() as p:
+            navegador = p.chromium.launch(
+                headless=True,
+                args=["--disable-dev-shm-usage"],
+            )
+            try:
+                pagina = navegador.new_page(
+                    viewport={"width": 1440, "height": 900}
+                )
+                pagina.goto(
+                    URL_PRIZMA,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+
+                usuario = pagina.locator('input[name="identification_number"]')
+                clave = pagina.locator('input[name="password"]')
+                boton = pagina.get_by_role(
+                    "button", name="Iniciar sesión", exact=True
+                )
+
+                usuario.wait_for(state="visible", timeout=timeout_ms)
+                clave.wait_for(state="visible", timeout=timeout_ms)
+                boton.wait_for(state="visible", timeout=timeout_ms)
+
+                usuario.fill(usuario_prizma)
+                clave.fill(contrasena_prizma)
+                boton.click(timeout=10000)
+
+                bienvenida = pagina.get_by_text(
+                    "Bienvenido a Prizma admin", exact=False
+                )
+
+                # PRIZMA muestra el rechazo de credenciales como un toast breve.
+                # Antes esperábamos hasta 15 s solo por la bienvenida; para cuando
+                # revisábamos el body, el toast ya podía haber desaparecido.
+                # Ahora observamos en paralelo éxito y rechazo desde el primer
+                # instante posterior al clic.
+                error_credenciales = pagina.get_by_text(
+                    "Credenciales incorrectas", exact=False
+                )
+
+                limite = 15000
+                transcurrido = 0
+                intervalo = 250
+
+                while transcurrido < limite:
+                    try:
+                        if bienvenida.count() > 0 and bienvenida.first.is_visible():
+                            return {
+                                "ok": True,
+                                "tipo": "ok",
+                                "mensaje": "Credenciales PRIZMA verificadas correctamente.",
+                            }
+                    except Exception:
+                        pass
+
+                    try:
+                        if (
+                            error_credenciales.count() > 0
+                            and error_credenciales.first.is_visible()
+                        ):
+                            return {
+                                "ok": False,
+                                "tipo": "credenciales",
+                                "mensaje": (
+                                    "No se pudo iniciar sesión en PRIZMA. "
+                                    "Verifica tu usuario y contraseña."
+                                ),
+                            }
+                    except Exception:
+                        pass
+
+                    # Fallback por si PRIZMA cambia el contenedor del toast pero
+                    # conserva el texto o una variante equivalente.
+                    try:
+                        texto = normalizar_texto(
+                            pagina.locator("body").inner_text(timeout=1500)
+                        )
+                        senales_credenciales = [
+                            "credenciales incorrectas",
+                            "credenciales invalidas",
+                            "usuario o contrasena",
+                            "usuario y contrasena",
+                            "contrasena incorrecta",
+                            "usuario incorrecto",
+                            "datos incorrectos",
+                            "no autorizado",
+                            "unauthorized",
+                            "invalid credentials",
+                        ]
+                        if any(s in texto for s in senales_credenciales):
+                            return {
+                                "ok": False,
+                                "tipo": "credenciales",
+                                "mensaje": (
+                                    "No se pudo iniciar sesión en PRIZMA. "
+                                    "Verifica tu usuario y contraseña."
+                                ),
+                            }
+                    except Exception:
+                        pass
+
+                    pagina.wait_for_timeout(intervalo)
+                    transcurrido += intervalo
+
+                # Si no vimos ni bienvenida ni el toast de rechazo, no culpamos
+                # al usuario: puede ser lentitud, mantenimiento o fallo del backend.
+                return {
+                    "ok": False,
+                    "tipo": "servicio",
+                    "mensaje": (
+                        "PRIZMA no respondió correctamente durante la validación "
+                        "del acceso. Intenta nuevamente en unos minutos."
+                    ),
+                }
+            finally:
+                try:
+                    navegador.close()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        return {
+            "ok": False,
+            "tipo": "servicio",
+            "mensaje": (
+                "No fue posible conectar con PRIZMA para validar el acceso. "
+                "Intenta nuevamente en unos minutos."
+            ),
+            "detalle": str(e),
+        }
+
+
 def iniciar_sesion_prizma(
     pagina,
     usuario_prizma,
@@ -3710,6 +3867,29 @@ def procesar_actividad(
 # MOTOR COMPLETO
 # ============================================================
 
+
+def _es_error_estructural_prizma(error):
+    texto = str(error or "")
+    senales = [
+        "Page crashed",
+        "Target crashed",
+        "Target page, context or browser has been closed",
+        "Timeout 30000ms exceeded",
+        "Timeout 60000ms exceeded",
+        "ERROR_ENTRANDO_CATEGORIA",
+        "ERROR_NO_SE_PUDO_VOLVER_AL_LISTADO",
+        "ERROR_RECUPERANDO_TRAS_PAGE_CRASH",
+        "ERROR_RECUPERANDO_PAGINA",
+        "ERROR_RECUPERANDO_FILA",
+        "ERROR_LOGIN_PRIZMA",
+    ]
+    return any(senal in texto for senal in senales)
+
+
+def _cancelacion_solicitada(estado):
+    return bool(estado.get("cancelar_solicitado"))
+
+
 def ejecutar_cargue(
     ruta_excel,
     ruta_zip,
@@ -3722,64 +3902,28 @@ def ejecutar_cargue(
     contrasena_prizma,
     estado,
 ):
+    navegador = None
 
     try:
-
         print()
         print("======================================")
         print("AUTO PRIZMA PRO")
         print("======================================")
-
-        print(
-            "VERSION_SCRIPT =",
-            VERSION_SCRIPT,
-        )
-
-        print(
-            "BUILD_INTERNO =",
-            BUILD_INTERNO,
-        )
-
-        print(
-            "URL =",
-            URL_PRIZMA,
-        )
-
-        print(
-            "MODO = CURSO COMPLETO"
-        )
-
-        print(
-            "NAVEGADOR = HEADLESS"
-        )
-
-        print(
-            "LOGIN = AUTOMÁTICO"
-        )
-
+        print("VERSION_SCRIPT =", VERSION_SCRIPT)
+        print("BUILD_INTERNO =", BUILD_INTERNO)
+        print("URL =", URL_PRIZMA)
+        print("MODO = CURSO COMPLETO")
+        print("NAVEGADOR = HEADLESS")
+        print("LOGIN = AUTOMÁTICO")
         print()
-        print(
-            "H5P -> RECURSO"
-        )
-
-        print(
-            "PDF -> RECURSO"
-        )
-
-        print(
-            "MATERIAL DESCARGABLE -> NO TOCAR"
-        )
-
-        # ----------------------------------------------------
-        # PREPARAR
-        # ----------------------------------------------------
+        print("H5P -> RECURSO")
+        print("PDF -> RECURSO")
+        print("MATERIAL DESCARGABLE -> NO TOCAR")
 
         actualizar_estado(
             estado,
             etapa="preparando",
-            mensaje=(
-                "Leyendo Excel y preparando recursos..."
-            ),
+            mensaje="Leyendo Excel y preparando recursos...",
             terminado=False,
         )
 
@@ -3791,274 +3935,169 @@ def ejecutar_cargue(
         )
 
         if not actividades:
-
             actualizar_estado(
                 estado,
                 etapa="error",
-                mensaje=(
-                    "No se encontraron actividades "
-                    "OVI/OVA/Retos compatibles."
-                ),
+                mensaje="No se encontraron actividades OVI/OVA/Retos compatibles.",
                 terminado=True,
             )
-
             return
 
-        indice_recursos = crear_indice_recursos(
-            ruta_zip
-        )
-
+        indice_recursos = crear_indice_recursos(ruta_zip)
         if not indice_recursos:
-
             actualizar_estado(
                 estado,
                 etapa="error",
-                mensaje=(
-                    "No se encontraron archivos "
-                    "H5P/PDF dentro del ZIP."
-                ),
+                mensaje="No se encontraron archivos H5P/PDF dentro del ZIP.",
                 terminado=True,
             )
-
             return
 
         actividades_a_procesar = actividades
-
-        preparar_detalle_actividades(
-            estado,
-            actividades_a_procesar,
-        )
-
-        print()
-        print(
-            "Actividades que se procesarán:",
-            len(actividades_a_procesar),
-        )
+        preparar_detalle_actividades(estado, actividades_a_procesar)
 
         actualizar_estado(
             estado,
             etapa="login",
-            mensaje=(
-                "Iniciando sesión automáticamente en PRIZMA..."
-            ),
-            total=len(
-                actividades_a_procesar
-            ),
+            mensaje="Iniciando sesión automáticamente en PRIZMA...",
+            total=len(actividades_a_procesar),
             procesadas=0,
             exitosas=0,
             errores=0,
         )
 
-        # ----------------------------------------------------
-        # PLAYWRIGHT
-        # ----------------------------------------------------
-
         with sync_playwright() as p:
-
-            navegador = p.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-dev-shm-usage",
-                ],
-            )
-
-            pagina = navegador.new_page(
-                viewport={
-                    "width": 1440,
-                    "height": 900,
-                }
-            )
-
             respuestas = []
+            captura = {"activa": False}
 
-            captura = {
-                "activa": False
-            }
-
-            def registrar_respuesta(
-                response,
-            ):
-
-                if not captura[
-                    "activa"
-                ]:
+            def registrar_respuesta(response):
+                if not captura["activa"]:
                     return
-
                 try:
-
-                    metodo = (
-                        response.request.method.upper()
-                    )
-
+                    metodo = response.request.method.upper()
                     if metodo == "GET":
                         return
-
-                    respuestas.append(
-                        {
-                            "metodo":
-                                metodo,
-
-                            "status":
-                                response.status,
-
-                            "url":
-                                response.url,
-                        }
-                    )
-
+                    respuestas.append({
+                        "metodo": metodo,
+                        "status": response.status,
+                        "url": response.url,
+                    })
                 except Exception:
                     pass
 
-            pagina.on(
-                "response",
-                registrar_respuesta,
-            )
+            def abrir_sesion_limpia(motivo=""):
+                nonlocal navegador
+                if motivo:
+                    print("⚠️ Reiniciando sesión PRIZMA:", motivo)
+                try:
+                    if navegador is not None:
+                        navegador.close()
+                except Exception:
+                    pass
 
-            # ------------------------------------------------
-            # LOGIN AUTOMÁTICO
-            # ------------------------------------------------
+                navegador = p.chromium.launch(
+                    headless=True,
+                    args=["--disable-dev-shm-usage"],
+                )
+                nueva_pagina = navegador.new_page(
+                    viewport={"width": 1440, "height": 900}
+                )
+                nueva_pagina.on("response", registrar_respuesta)
+                iniciar_sesion_prizma(
+                    nueva_pagina,
+                    usuario_prizma,
+                    contrasena_prizma,
+                )
+                return nueva_pagina
 
-            iniciar_sesion_prizma(
-                pagina,
-                usuario_prizma,
-                contrasena_prizma,
-            )
+            pagina = abrir_sesion_limpia("inicio del cargue")
 
             actualizar_estado(
                 estado,
                 etapa="procesando",
-                mensaje=(
-                    "Login correcto. "
-                    "Módulo Actividades abierto."
-                ),
+                mensaje="Login correcto. Módulo Actividades abierto.",
             )
 
             exitosas = 0
             errores = 0
             procesadas = 0
+            errores_estructurales_consecutivos = 0
 
-            # ------------------------------------------------
-            # TODAS LAS ACTIVIDADES
-            # ------------------------------------------------
+            for numero, actividad in enumerate(actividades_a_procesar, start=1):
+                if _cancelacion_solicitada(estado):
+                    actualizar_estado(
+                        estado,
+                        etapa="cancelado",
+                        mensaje=(
+                            "Proceso cancelado por el usuario. "
+                            f"Se alcanzaron a procesar {procesadas} de "
+                            f"{len(actividades_a_procesar)} actividades."
+                        ),
+                        terminado=True,
+                    )
+                    return
 
-            for numero, actividad in enumerate(
-                actividades_a_procesar,
-                start=1,
-            ):
-
-                print()
                 print()
                 print("######################################")
-
-                print(
-                    f"ACTIVIDAD {numero} "
-                    f"DE {len(actividades_a_procesar)}"
-                )
-
+                print(f"ACTIVIDAD {numero} DE {len(actividades_a_procesar)}")
                 print("######################################")
 
                 actualizar_estado(
                     estado,
                     etapa="procesando",
                     mensaje=(
-                        f"Procesando {numero} de "
-                        f"{len(actividades_a_procesar)}: "
+                        f"Procesando {numero} de {len(actividades_a_procesar)}: "
                         + actividad["nombre"]
                     ),
                 )
+                actualizar_detalle_actividad(estado, numero, "procesando")
 
-                actualizar_detalle_actividad(
-                    estado,
-                    numero,
-                    "procesando",
-                )
+                # Si la sesión quedó dañada en la actividad anterior, no se reutiliza.
+                if errores_estructurales_consecutivos > 0:
+                    try:
+                        pagina = abrir_sesion_limpia(
+                            "recuperación preventiva tras error estructural"
+                        )
+                        errores_estructurales_consecutivos = 0
+                    except Exception as e:
+                        print(traceback.format_exc())
+                        resultado = {
+                            "ok": False,
+                            "error": "ERROR_RECUPERANDO_SESION: " + str(e),
+                            "recurso": "",
+                        }
+                    else:
+                        resultado = None
+                else:
+                    resultado = None
 
-                try:
-
-                    resultado = procesar_actividad(
-                        pagina,
-                        actividad,
-                        indice_recursos,
-                        carpeta_temp,
-                        respuestas,
-                        captura,
-                        actividades_a_procesar,
-                    )
-
-                except Exception as e:
-
-                    print()
-                    print(
-                        traceback.format_exc()
-                    )
-
-                    mensaje_excepcion = str(e)
-                    pagina_caida = (
-                        "Page crashed" in mensaje_excepcion
-                        or "Target page, context or browser has been closed"
-                        in mensaje_excepcion
-                    )
-
-                    resultado = {
-                        "ok": False,
-
-                        "error":
-                            "ERROR_NO_CONTROLADO: "
-                            + mensaje_excepcion,
-
-                        "recurso": "",
-                    }
-
-                    if pagina_caida:
-
-                        print()
-                        print(
-                            "⚠️ Chromium/PRIZMA se cayó. "
-                            "Intentando recuperar la sesión y "
-                            "reintentar la actividad una vez..."
+                if resultado is None:
+                    # Preflight: si no estamos realmente en el listado, reiniciar antes de tocar la actividad.
+                    try:
+                        if not asegurar_listado(pagina):
+                            pagina = abrir_sesion_limpia(
+                                "no fue posible confirmar el listado antes de la actividad"
+                            )
+                    except Exception:
+                        pagina = abrir_sesion_limpia(
+                            "fallo comprobando el listado antes de la actividad"
                         )
 
-                        actualizar_estado(
-                            estado,
-                            mensaje=(
-                                "El navegador se reinició durante "
-                                "el cargue. Recuperando PRIZMA y "
-                                "reintentando la actividad actual..."
-                            ),
-                        )
+                    resultado = None
+                    ultimo_error = None
+
+                    # Una actividad puede reintentarse una sola vez, siempre con navegador limpio.
+                    for intento in (1, 2):
+                        if _cancelacion_solicitada(estado):
+                            actualizar_estado(
+                                estado,
+                                etapa="cancelado",
+                                mensaje="Proceso cancelado por el usuario.",
+                                terminado=True,
+                            )
+                            return
 
                         try:
-
-                            try:
-                                navegador.close()
-                            except Exception:
-                                pass
-
-                            navegador = p.chromium.launch(
-                                headless=True,
-                                args=[
-                                    "--disable-dev-shm-usage",
-                                ],
-                            )
-
-                            pagina = navegador.new_page(
-                                viewport={
-                                    "width": 1440,
-                                    "height": 900,
-                                }
-                            )
-
-                            pagina.on(
-                                "response",
-                                registrar_respuesta,
-                            )
-
-                            iniciar_sesion_prizma(
-                                pagina,
-                                usuario_prizma,
-                                contrasena_prizma,
-                            )
-
                             resultado = procesar_actividad(
                                 pagina,
                                 actividad,
@@ -4068,112 +4107,72 @@ def ejecutar_cargue(
                                 captura,
                                 actividades_a_procesar,
                             )
-
-                        except Exception as e_reintento:
-
-                            print()
-                            print(
-                                traceback.format_exc()
-                            )
-
+                        except Exception as e:
+                            print(traceback.format_exc())
+                            ultimo_error = "ERROR_NO_CONTROLADO: " + str(e)
                             resultado = {
                                 "ok": False,
-                                "error": (
-                                    "ERROR_RECUPERANDO_TRAS_PAGE_CRASH: "
-                                    + str(e_reintento)
-                                ),
+                                "error": ultimo_error,
                                 "recurso": "",
                             }
 
-                    else:
+                        if resultado.get("ok"):
+                            break
 
-                        try:
-
-                            cancelar_edicion_segura(
-                                pagina
+                        error_actual = resultado.get("error", "")
+                        if intento == 1 and _es_error_estructural_prizma(error_actual):
+                            actualizar_estado(
+                                estado,
+                                mensaje=(
+                                    "PRIZMA o el navegador perdieron estabilidad. "
+                                    "Reiniciando la sesión y reintentando la actividad actual..."
+                                ),
                             )
-
-                        except Exception:
-                            pass
-
-                        try:
-
-                            asegurar_listado(
-                                pagina
-                            )
-
-                        except Exception:
-                            pass
+                            try:
+                                pagina = abrir_sesion_limpia(error_actual)
+                                continue
+                            except Exception as e_reinicio:
+                                resultado = {
+                                    "ok": False,
+                                    "error": (
+                                        "ERROR_RECUPERANDO_SESION: "
+                                        + str(e_reinicio)
+                                    ),
+                                    "recurso": resultado.get("recurso", ""),
+                                }
+                        break
 
                 procesadas += 1
 
-                # --------------------------------------------
-                # OK
-                # --------------------------------------------
-
-                if resultado[
-                    "ok"
-                ]:
-
+                if resultado["ok"]:
                     exitosas += 1
-
-                    actualizar_detalle_actividad(
-                        estado,
-                        numero,
-                        "ok",
-                    )
-
-                    print()
-                    print(
-                        "✅ ACTIVIDAD COMPLETADA."
-                    )
-
+                    errores_estructurales_consecutivos = 0
+                    actualizar_detalle_actividad(estado, numero, "ok")
                     guardar_resultado(
                         ruta_reporte,
                         actividad,
                         "OK",
-                        (
-                            "Carga guardada - "
-                            "PATCH confirmado"
-                        ),
+                        "Carga guardada - PATCH confirmado",
                         resultado["recurso"],
                     )
-
-                # --------------------------------------------
-                # ERROR
-                # --------------------------------------------
-
                 else:
-
                     errores += 1
+                    error_actual = resultado.get("error", "ERROR_DESCONOCIDO")
+                    if _es_error_estructural_prizma(error_actual):
+                        errores_estructurales_consecutivos += 1
+                    else:
+                        errores_estructurales_consecutivos = 0
 
                     actualizar_detalle_actividad(
-                        estado,
-                        numero,
-                        "error",
-                        resultado["error"],
+                        estado, numero, "error", error_actual
                     )
-
-                    print()
-                    print(
-                        "❌ ACTIVIDAD CON ERROR:"
-                    )
-
-                    print(
-                        resultado["error"]
-                    )
-
                     guardar_resultado(
                         ruta_reporte,
                         actividad,
                         "ERROR",
-                        resultado["error"],
-                        resultado["recurso"],
+                        error_actual,
+                        resultado.get("recurso", ""),
                     )
-
-                # --------------------------------------------
-                # ACTUALIZAR WEB
-                # --------------------------------------------
 
                 actualizar_estado(
                     estado,
@@ -4181,72 +4180,61 @@ def ejecutar_cargue(
                     exitosas=exitosas,
                     errores=errores,
                     mensaje=(
-                        f"Procesadas {procesadas} de "
-                        f"{len(actividades_a_procesar)}"
+                        f"Procesadas {procesadas} de {len(actividades_a_procesar)}"
                     ),
                 )
 
-                try:
-
-                    asegurar_listado(
-                        pagina
+                if _cancelacion_solicitada(estado):
+                    actualizar_estado(
+                        estado,
+                        etapa="cancelado",
+                        mensaje="Proceso cancelado por el usuario.",
+                        terminado=True,
                     )
+                    return
 
+                try:
+                    pagina.wait_for_timeout(700)
                 except Exception:
-                    pass
-
-                try:
-                    pagina.wait_for_timeout(
-                        700
+                    errores_estructurales_consecutivos = max(
+                        1, errores_estructurales_consecutivos
                     )
-                except Exception as e_espera:
-                    if "Page crashed" in str(e_espera):
-                        print(
-                            "⚠️ La página cayó al finalizar una actividad; "
-                            "se recuperará en la siguiente iteración si es necesario."
-                        )
-                    else:
-                        print(
-                            "⚠️ No fue posible realizar la espera entre actividades:",
-                            str(e_espera),
-                        )
 
-            navegador.close()
-
-        # ----------------------------------------------------
-        # FINAL
-        # ----------------------------------------------------
+            try:
+                if navegador is not None:
+                    navegador.close()
+            except Exception:
+                pass
 
         actualizar_estado(
             estado,
             etapa="finalizado",
             mensaje=(
                 "Cargue completo finalizado. "
-                f"Exitosas: {exitosas}. "
-                f"Errores: {errores}."
+                f"Exitosas: {exitosas}. Errores: {errores}."
             ),
             terminado=True,
         )
 
     except Exception as e:
-
         print()
-        print(
-            traceback.format_exc()
-        )
-
+        print(traceback.format_exc())
         mensaje_error = str(e)
-
         if "ERROR_LOGIN_PRIZMA" in mensaje_error:
-
             mensaje_error = (
                 "No fue posible iniciar sesión en PRIZMA. "
                 "Verifica el usuario y la contraseña."
             )
-
         actualizar_estado(
             estado,
             etapa="error",
             mensaje=mensaje_error,
             terminado=True,
         )
+    finally:
+        try:
+            if navegador is not None:
+                navegador.close()
+        except Exception:
+            pass
+

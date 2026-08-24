@@ -18,6 +18,7 @@ from openpyxl import load_workbook, Workbook
 
 from motor_prizma import (
     ejecutar_cargue,
+    validar_credenciales_prizma,
     determinar_tipo_archivo,
     normalizar_categoria,
     normalizar_texto,
@@ -31,7 +32,9 @@ import html
 import json
 import re
 import threading
+from collections import deque
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 
 app = FastAPI(
@@ -92,6 +95,18 @@ for carpeta in [
 
 TRABAJOS = {}
 HISTORIAL_LOCK = threading.Lock()
+TRABAJOS_LOCK = threading.RLock()
+COLA_CARGUES = deque()
+COLA_CONDICION = threading.Condition(TRABAJOS_LOCK)
+ZONA_HORARIA_COLOMBIA = ZoneInfo("America/Bogota")
+
+
+def _ahora_colombia():
+    return datetime.now(ZONA_HORARIA_COLOMBIA)
+
+
+def _ahora_colombia_iso():
+    return _ahora_colombia().isoformat(timespec="seconds")
 
 
 def _sanitizar_parte_nombre(valor, limite=70):
@@ -120,7 +135,7 @@ def _cursos_desde_hojas(hojas):
 
 
 def _nombre_reporte(cursos, trabajo_id):
-    fecha = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    fecha = _ahora_colombia().strftime("%Y-%m-%d_%H-%M-%S")
 
     if cursos:
         curso = _sanitizar_parte_nombre(cursos[0]["curso"], 58)
@@ -165,12 +180,13 @@ def _registrar_reporte_final(trabajo):
             trabajo["historial_registrado"] = True
             return
 
-        fecha_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+        fecha_iso = _ahora_colombia_iso()
         registros.append({
             "id": trabajo_id,
             "fecha_iso": fecha_iso,
             "archivo_reporte": os.path.basename(ruta_reporte),
             "cursos": trabajo.get("cursos", []),
+            "estado_final": trabajo.get("etapa", "finalizado"),
         })
         _guardar_historial(registros)
         trabajo["historial_registrado"] = True
@@ -203,6 +219,94 @@ def ejecutar_cargue_con_historial(
         )
     finally:
         _registrar_reporte_final(trabajo)
+
+
+# ============================================================
+# COLA GLOBAL DE CARGUES - 1 PROCESO A LA VEZ
+# ============================================================
+
+def _posicion_en_cola(trabajo_id):
+    with TRABAJOS_LOCK:
+        pendientes = [
+            tid for tid in COLA_CARGUES
+            if tid in TRABAJOS
+            and TRABAJOS[tid].get("etapa") == "en_cola"
+            and not TRABAJOS[tid].get("terminado")
+        ]
+        try:
+            return pendientes.index(trabajo_id) + 1
+        except ValueError:
+            return None
+
+
+def _encolar_trabajo(trabajo_id, usuario_prizma, contrasena_prizma):
+    with COLA_CONDICION:
+        trabajo = TRABAJOS[trabajo_id]
+        trabajo["usuario_prizma_temporal"] = usuario_prizma
+        trabajo["contrasena_prizma_temporal"] = contrasena_prizma
+        trabajo["etapa"] = "en_cola"
+        trabajo["mensaje"] = "Cargue agregado a la cola de procesamiento."
+        trabajo["encolado_en"] = _ahora_colombia_iso()
+        trabajo["cancelar_solicitado"] = False
+        trabajo["terminado"] = False
+        if trabajo_id not in COLA_CARGUES:
+            COLA_CARGUES.append(trabajo_id)
+        COLA_CONDICION.notify_all()
+
+
+def _worker_cola_cargues():
+    while True:
+        with COLA_CONDICION:
+            while not COLA_CARGUES:
+                COLA_CONDICION.wait()
+
+            trabajo_id = COLA_CARGUES.popleft()
+            trabajo = TRABAJOS.get(trabajo_id)
+            if not trabajo:
+                continue
+            if trabajo.get("terminado") or trabajo.get("cancelar_solicitado"):
+                continue
+
+            usuario = trabajo.pop("usuario_prizma_temporal", "")
+            contrasena = trabajo.pop("contrasena_prizma_temporal", "")
+            trabajo["etapa"] = "iniciando"
+            trabajo["mensaje"] = "Iniciando navegador y autenticación PRIZMA..."
+            trabajo["iniciado_en"] = _ahora_colombia_iso()
+            trabajo["terminado"] = False
+
+        try:
+            ejecutar_cargue_con_historial(
+                trabajo["ruta_excel"],
+                trabajo["ruta_zip"],
+                trabajo["carpeta_temp"],
+                trabajo["ruta_reporte"],
+                trabajo["procesar_ovi"],
+                trabajo["procesar_ova"],
+                trabajo["procesar_retos"],
+                usuario,
+                contrasena,
+                trabajo,
+            )
+        except Exception as exc:
+            trabajo["etapa"] = "error"
+            trabajo["mensaje"] = str(exc)
+            trabajo["terminado"] = True
+        finally:
+            usuario = ""
+            contrasena = ""
+            trabajo.pop("usuario_prizma_temporal", None)
+            trabajo.pop("contrasena_prizma_temporal", None)
+            trabajo["finalizado_en"] = _ahora_colombia_iso()
+            with COLA_CONDICION:
+                COLA_CONDICION.notify_all()
+
+
+_HILO_COLA = threading.Thread(
+    target=_worker_cola_cargues,
+    name="auto-prizma-cola",
+    daemon=True,
+)
+_HILO_COLA.start()
 
 
 # ============================================================
@@ -806,6 +910,15 @@ def generar_html(
                 </tr>
                 """
 
+        bloque_error_revision = ""
+        if error:
+            bloque_error_revision = f"""
+            <div class="alerta-error" style="grid-column:1/-1;margin-bottom:18px;">
+                <div class="alerta-icono">!</div>
+                <div><strong>No se pudo iniciar el cargue</strong><p>{e(error)}</p></div>
+            </div>
+            """
+
         contenido = f"""
         <section id="cargue-principal" class="encabezado-exito panel">
             <div class="check-grande">✓</div>
@@ -823,6 +936,8 @@ def generar_html(
             <div class="resumen-card violeta"><span>H5P</span><strong>{total_h5p}</strong></div>
             <div class="resumen-card rojo"><span>PDF</span><strong>{total_pdf}</strong></div>
         </section>
+
+        {bloque_error_revision}
 
         <section class="revision-grid">
             <div class="panel tabla-panel">
@@ -1470,6 +1585,12 @@ async def analizar(
 
             "historial_registrado":
                 False,
+
+            "creado_en":
+                _ahora_colombia_iso(),
+
+            "cancelar_solicitado":
+                False,
         }
 
         resultado = {
@@ -1479,6 +1600,8 @@ async def analizar(
             "zip":
                 zip_info,
         }
+
+        TRABAJOS[trabajo_id]["resultado_analisis"] = resultado
 
         return generar_html(
             resultado=resultado,
@@ -1506,72 +1629,36 @@ def iniciar_trabajo(
     usuario_prizma: str = Form(...),
     contrasena_prizma: str = Form(...),
 ):
-
-    trabajo = TRABAJOS.get(
-        trabajo_id
-    )
-
+    trabajo = TRABAJOS.get(trabajo_id)
     if not trabajo:
-        return HTMLResponse(
-            """
-            <h2>Trabajo no encontrado.</h2>
-            <a href="/">Volver</a>
-            """,
-            status_code=404,
+        return HTMLResponse("<h2>Trabajo no encontrado.</h2><a href='/'>Volver</a>", status_code=404)
+
+    usuario_prizma = usuario_prizma.strip()
+    if not usuario_prizma or not contrasena_prizma:
+        return generar_html(
+            resultado=trabajo.get("resultado_analisis"),
+            trabajo_id=trabajo_id,
+            error="Debes ingresar el usuario y la contraseña de PRIZMA.",
         )
 
-    usuario_prizma = (
-        usuario_prizma.strip()
-    )
+    if trabajo.get("etapa") not in ["analizado", "error"]:
+        return HTMLResponse("<h2>Este trabajo ya fue iniciado.</h2>")
 
-    if not usuario_prizma:
-        return HTMLResponse(
-            """
-            <h2>Debes ingresar el usuario PRIZMA.</h2>
-            <a href="/">Volver</a>
-            """,
-            status_code=400,
+    # Validar el acceso antes de encolar el curso.
+    trabajo["etapa"] = "validando_login"
+    trabajo["mensaje"] = "Validando usuario y contraseña en PRIZMA..."
+    validacion = validar_credenciales_prizma(usuario_prizma, contrasena_prizma)
+
+    if not validacion.get("ok"):
+        trabajo["etapa"] = "analizado"
+        trabajo["mensaje"] = validacion.get("mensaje", "No fue posible validar el acceso a PRIZMA.")
+        return generar_html(
+            resultado=trabajo.get("resultado_analisis"),
+            trabajo_id=trabajo_id,
+            error=trabajo["mensaje"],
         )
 
-    if not contrasena_prizma:
-        return HTMLResponse(
-            """
-            <h2>Debes ingresar la contraseña PRIZMA.</h2>
-            <a href="/">Volver</a>
-            """,
-            status_code=400,
-        )
-
-    if trabajo["etapa"] not in [
-        "analizado",
-        "error",
-    ]:
-        return HTMLResponse(
-            """
-            <h2>Este trabajo ya fue iniciado.</h2>
-            """
-        )
-
-    trabajo["etapa"] = "iniciando"
-    trabajo["mensaje"] = (
-        "Iniciando navegador y autenticación PRIZMA..."
-    )
-    trabajo["terminado"] = False
-    trabajo["iniciado_en"] = datetime.now().astimezone().isoformat(timespec="seconds")
-
-    background_tasks.add_task(
-        ejecutar_cargue_con_historial,
-        trabajo["ruta_excel"],
-        trabajo["ruta_zip"],
-        trabajo["carpeta_temp"],
-        trabajo["ruta_reporte"],
-        trabajo["procesar_ovi"],
-        trabajo["procesar_ova"],
-        trabajo["procesar_retos"],
-        usuario_prizma,
-        contrasena_prizma,
-        trabajo,
-    )
+    _encolar_trabajo(trabajo_id, usuario_prizma, contrasena_prizma)
 
     html_progreso = r"""
     <!DOCTYPE html>
@@ -1727,6 +1814,9 @@ def iniciar_trabajo(
                             <div>✅ Completada</div>
                             <div>❌ Con error</div>
                         </div>
+                        <form action="/cancelar/__TRABAJO_ID__" method="post" style="margin-top:18px;">
+                            <button type="submit" style="width:100%;border:1px solid #fecaca;background:#fff;color:#b42318;border-radius:9px;padding:11px 14px;cursor:pointer;font-weight:800;">Cancelar proceso</button>
+                        </form>
                         <div id="final"></div>
                     </div>
                 </section>
@@ -1793,7 +1883,7 @@ def iniciar_trabajo(
                     const respuesta = await fetch("/estado/" + trabajoId);
                     const datos = await respuesta.json();
 
-                    document.getElementById("estado").innerText = datos.mensaje;
+                    document.getElementById("estado").innerText = datos.mensaje + (datos.posicion_cola ? ' · Posición en cola: ' + datos.posicion_cola : '');
                     document.getElementById("procesadas").innerText = datos.procesadas;
                     document.getElementById("exitosas").innerText = datos.exitosas;
                     document.getElementById("errores").innerText = datos.errores;
@@ -1860,6 +1950,10 @@ def _formatear_inicio_cargue(fecha_iso):
         return "Iniciando..."
     try:
         fecha = datetime.fromisoformat(fecha_iso)
+        if fecha.tzinfo is None:
+            fecha = fecha.replace(tzinfo=ZONA_HORARIA_COLOMBIA)
+        else:
+            fecha = fecha.astimezone(ZONA_HORARIA_COLOMBIA)
         return fecha.strftime("%d/%m/%Y · %I:%M %p").replace("AM", "a. m.").replace("PM", "p. m.")
     except Exception:
         return "En progreso"
@@ -1882,7 +1976,12 @@ def _pagina_cargues_activos(trabajos):
         errores = int(trabajo.get("errores") or 0)
         porcentaje = max(0, min(100, round((procesadas / total) * 100) if total > 0 else 0))
         trabajo_id = html.escape(str(trabajo.get("id") or ""))
-        tarjetas.append(f'''<article class="carga-card"><div class="curso-bloque"><div class="curso-icono">▣</div><div class="curso-texto"><h2>{html.escape(curso)}</h2><p>Programa: {html.escape(programa)}</p><span class="estado-chip"><span></span> En progreso</span></div></div><div class="inicio-bloque"><small>◷ Iniciado</small><strong>{html.escape(_formatear_inicio_cargue(trabajo.get("iniciado_en")))}</strong></div><div class="avance-bloque"><div class="avance-cab"><span>Progreso general</span><strong>{porcentaje}%</strong></div><div class="barra"><div class="barra-interna" style="width:{porcentaje}%"></div></div><div class="metricas"><div><i class="verde"></i><small>Procesadas</small><strong>{procesadas}</strong></div><div><i class="verde"></i><small>Exitosas</small><strong>{exitosas}</strong></div><div><i class="rojo"></i><small>Errores</small><strong>{errores}</strong></div></div></div><div class="accion-bloque"><a href="/proceso/{trabajo_id}">Entrar al proceso <b>›</b></a><small>Ver detalle por actividad</small></div></article>''')
+        en_cola = trabajo.get("etapa") == "en_cola"
+        posicion = _posicion_en_cola(str(trabajo.get("id") or "")) if en_cola else None
+        estado_texto = f"En cola · #{posicion}" if posicion else "En progreso"
+        inicio_label = "En cola desde" if en_cola else "Iniciado"
+        fecha_mostrar = trabajo.get("encolado_en") if en_cola else trabajo.get("iniciado_en")
+        tarjetas.append(f'''<article class="carga-card"><div class="curso-bloque"><div class="curso-icono">▣</div><div class="curso-texto"><h2>{html.escape(curso)}</h2><p>Programa: {html.escape(programa)}</p><span class="estado-chip"><span></span> {html.escape(estado_texto)}</span></div></div><div class="inicio-bloque"><small>◷ {inicio_label}</small><strong>{html.escape(_formatear_inicio_cargue(fecha_mostrar))}</strong></div><div class="avance-bloque"><div class="avance-cab"><span>Progreso general</span><strong>{porcentaje}%</strong></div><div class="barra"><div class="barra-interna" style="width:{porcentaje}%"></div></div><div class="metricas"><div><i class="verde"></i><small>Procesadas</small><strong>{procesadas}</strong></div><div><i class="verde"></i><small>Exitosas</small><strong>{exitosas}</strong></div><div><i class="rojo"></i><small>Errores</small><strong>{errores}</strong></div></div></div><div class="accion-bloque"><a href="/proceso/{trabajo_id}">Entrar al proceso <b>›</b></a><form action="/cancelar/{trabajo_id}" method="post" style="margin-top:8px"><button type="submit" style="border:1px solid #fecaca;background:#fff;color:#b42318;border-radius:8px;padding:8px 10px;cursor:pointer;font-weight:700">Cancelar</button></form></div></article>''')
     cuerpo = "".join(tarjetas)
     cantidad = len(trabajos)
     plural = "s" if cantidad != 1 else ""
@@ -1893,17 +1992,57 @@ def _pagina_cargues_activos(trabajos):
 
 @app.get("/cargue-actual", response_class=HTMLResponse)
 def cargue_actual():
-    activos = [trabajo for trabajo in TRABAJOS.values() if trabajo.get("iniciado_en") and not trabajo.get("terminado")]
-    activos.sort(key=lambda item: item.get("iniciado_en", ""), reverse=True)
+    activos = [
+        trabajo for trabajo in TRABAJOS.values()
+        if not trabajo.get("terminado")
+        and trabajo.get("etapa") in {"en_cola", "iniciando", "login", "preparando", "procesando", "validando_login"}
+    ]
+    activos.sort(key=lambda item: item.get("encolado_en") or item.get("iniciado_en") or item.get("creado_en", ""))
     if not activos:
         return _pagina_sin_cargue_actual()
     return _pagina_cargues_activos(activos)
 
 
+@app.post("/cancelar/{trabajo_id}", response_class=HTMLResponse)
+def cancelar_trabajo(trabajo_id: str):
+    with COLA_CONDICION:
+        trabajo = TRABAJOS.get(trabajo_id)
+        if not trabajo:
+            return HTMLResponse("<h2>Proceso no encontrado.</h2>", status_code=404)
+
+        if trabajo.get("terminado"):
+            return HTMLResponse(
+                "<script>window.location='/cargue-actual';</script>"
+            )
+
+        trabajo["cancelar_solicitado"] = True
+
+        if trabajo.get("etapa") == "en_cola":
+            try:
+                COLA_CARGUES.remove(trabajo_id)
+            except ValueError:
+                pass
+            trabajo.pop("usuario_prizma_temporal", None)
+            trabajo.pop("contrasena_prizma_temporal", None)
+            trabajo["etapa"] = "cancelado"
+            trabajo["mensaje"] = "Proceso cancelado antes de iniciar."
+            trabajo["terminado"] = True
+            trabajo["finalizado_en"] = _ahora_colombia_iso()
+        else:
+            trabajo["mensaje"] = (
+                "Cancelación solicitada. El proceso se detendrá de forma segura "
+                "al terminar la actividad actual."
+            )
+
+        COLA_CONDICION.notify_all()
+
+    return HTMLResponse("<script>window.location='/cargue-actual';</script>")
+
+
 @app.get("/proceso/{trabajo_id}", response_class=HTMLResponse)
 def ver_proceso(trabajo_id: str):
     trabajo = TRABAJOS.get(trabajo_id)
-    if not trabajo or not trabajo.get("iniciado_en"):
+    if not trabajo:
         return HTMLResponse("<h2>Proceso no encontrado.</h2><p><a href='/cargue-actual'>Volver a Cargue actual</a></p>", status_code=404)
     pagina = trabajo.get("pagina_progreso")
     if pagina:
@@ -1968,6 +2107,8 @@ def estado_trabajo(
             os.path.isfile(
                 trabajo["ruta_reporte"]
             ),
+        "posicion_cola": _posicion_en_cola(trabajo_id),
+        "cancelar_solicitado": bool(trabajo.get("cancelar_solicitado")),
     }
 
 
@@ -1978,6 +2119,10 @@ def estado_trabajo(
 def _formatear_fecha_hora(fecha_iso):
     try:
         fecha = datetime.fromisoformat(fecha_iso)
+        if fecha.tzinfo is None:
+            fecha = fecha.replace(tzinfo=ZONA_HORARIA_COLOMBIA)
+        else:
+            fecha = fecha.astimezone(ZONA_HORARIA_COLOMBIA)
     except Exception:
         return "—", "—"
 
