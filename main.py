@@ -98,6 +98,7 @@ HISTORIAL_LOCK = threading.Lock()
 TRABAJOS_LOCK = threading.RLock()
 COLA_CARGUES = deque()
 COLA_CONDICION = threading.Condition(TRABAJOS_LOCK)
+MAX_CARGUES_SIMULTANEOS = 2
 ZONA_HORARIA_COLOMBIA = ZoneInfo("America/Bogota")
 
 
@@ -222,7 +223,7 @@ def ejecutar_cargue_con_historial(
 
 
 # ============================================================
-# COLA GLOBAL DE CARGUES - 1 PROCESO A LA VEZ
+# COLA GLOBAL DE CARGUES - HASTA 2 PROCESOS A LA VEZ
 # ============================================================
 
 def _posicion_en_cola(trabajo_id):
@@ -301,12 +302,15 @@ def _worker_cola_cargues():
                 COLA_CONDICION.notify_all()
 
 
-_HILO_COLA = threading.Thread(
-    target=_worker_cola_cargues,
-    name="auto-prizma-cola",
-    daemon=True,
-)
-_HILO_COLA.start()
+_HILOS_COLA = []
+for numero_worker in range(1, MAX_CARGUES_SIMULTANEOS + 1):
+    hilo = threading.Thread(
+        target=_worker_cola_cargues,
+        name=f"auto-prizma-cola-{numero_worker}",
+        daemon=True,
+    )
+    hilo.start()
+    _HILOS_COLA.append(hilo)
 
 
 # ============================================================

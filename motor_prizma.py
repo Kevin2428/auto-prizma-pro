@@ -9,6 +9,8 @@ import csv
 import os
 import re
 import zipfile
+import io
+import json
 import unicodedata
 import shutil
 import traceback
@@ -253,11 +255,22 @@ def limpiar_prefijo_tecnico_recurso(
         nombre_sin_extension
     )
 
-    # Prefijos observados en paquetes de recursos:
-    # ID003-Tema_4-...
-    # ID012-Tema_3-...
+    # Prefijos técnicos observados en paquetes de recursos.
+    # Ejemplos:
+    # ID003-Tema_4-Ruta_para_analizar.h5p
+    # U1-T1-Principios jurídicos.pdf
+    # U2-T4-Caso aplicado.pdf
+    #
+    # normalizar_texto() convierte guiones y guiones bajos en espacios,
+    # por eso los patrones se aplican sobre la versión normalizada.
     nombre_n = re.sub(
         r"^id\d+\s+tema\s+\d+\s+",
+        "",
+        nombre_n,
+    )
+
+    nombre_n = re.sub(
+        r"^u\d+\s+t\d+\s+",
         "",
         nombre_n,
     )
@@ -365,6 +378,135 @@ def recurso_corto_es_unico_para_actividad(
         unica["fila_excel"]
         == actividad["fila_excel"]
     )
+
+
+def obtener_titulo_interno_h5p(
+    recurso,
+):
+    """
+    Lee únicamente h5p.json de un H5P concreto.
+
+    IMPORTANTE:
+    - No se usa durante el indexado general.
+    - Solo se invoca como fallback cuando el nombre externo quedó
+      ambiguo y el flujo normal no pudo resolverlo de forma segura.
+    - No modifica la regla de ERROR_RECURSO_DUPLICADO.
+    """
+
+    if recurso.get("extension") != ".h5p":
+        return ""
+
+    try:
+        with zipfile.ZipFile(
+            recurso["zip"],
+            "r",
+        ) as zip_ref:
+
+            datos_h5p = zip_ref.read(
+                recurso["miembro"]
+            )
+
+        with zipfile.ZipFile(
+            io.BytesIO(datos_h5p),
+            "r",
+        ) as h5p_ref:
+
+            if "h5p.json" not in h5p_ref.namelist():
+                return ""
+
+            datos_json = h5p_ref.read(
+                "h5p.json"
+            )
+
+        manifiesto = json.loads(
+            datos_json.decode(
+                "utf-8-sig"
+            )
+        )
+
+        titulo = manifiesto.get(
+            "title",
+            "",
+        )
+
+        return str(titulo).strip()
+
+    except Exception as error:
+        print(
+            "No se pudo leer h5p.json de",
+            recurso.get("nombre", ""),
+            "|",
+            type(error).__name__,
+            str(error),
+        )
+        return ""
+
+
+def resolver_h5p_ambiguo_por_titulo_interno(
+    actividad,
+    recursos_ambiguos,
+):
+    """
+    Intenta resolver un ERROR_RECURSO_AMBIGUO leyendo el título interno
+    de los pocos H5P implicados. Exige coincidencia EXACTA normalizada.
+
+    Si encuentra 0 o más de 1 coincidencias, no adivina.
+    """
+
+    if not recursos_ambiguos:
+        return None
+
+    actividad_n = normalizar_texto(
+        actividad["nombre"]
+    )
+
+    coincidencias = []
+
+    # Evitar abrir dos veces el mismo miembro si llegó repetido a la lista.
+    vistos = set()
+
+    for recurso in recursos_ambiguos:
+        clave = (
+            recurso.get("zip"),
+            recurso.get("miembro"),
+        )
+
+        if clave in vistos:
+            continue
+
+        vistos.add(clave)
+
+        titulo = obtener_titulo_interno_h5p(
+            recurso
+        )
+
+        if not titulo:
+            continue
+
+        titulo_n = normalizar_texto(
+            titulo
+        )
+
+        print(
+            "Título H5P interno:",
+            recurso.get("nombre", ""),
+            "->",
+            titulo,
+        )
+
+        if titulo_n == actividad_n:
+            coincidencias.append(
+                recurso.copy()
+            )
+
+    if len(coincidencias) != 1:
+        return None
+
+    elegido = coincidencias[0]
+    elegido["puntuacion"] = 1000
+    elegido["metodo"] = "TITULO_INTERNO_H5P_EXACTO"
+
+    return elegido
 
 
 # ============================================================
@@ -869,6 +1011,7 @@ def resolver_recurso(
 
         candidatos_cortos = []
         hubo_ambiguos = False
+        recursos_ambiguos = []
 
         for recurso in indice_recursos:
 
@@ -890,6 +1033,9 @@ def resolver_recurso(
             ):
 
                 hubo_ambiguos = True
+                recursos_ambiguos.append(
+                    recurso
+                )
                 continue
 
             candidato = recurso.copy()
@@ -926,24 +1072,62 @@ def resolver_recurso(
 
             if hubo_ambiguos:
 
+                # Fallback excepcional SOLO para H5P ambiguos.
+                # No se ejecuta para duplicados y no recorre todos los H5P
+                # del curso: únicamente abre los recursos que ya quedaron
+                # implicados en la ambigüedad del nombre externo.
+                if extension == ".h5p":
+
+                    candidato_interno = (
+                        resolver_h5p_ambiguo_por_titulo_interno(
+                            actividad,
+                            recursos_ambiguos,
+                        )
+                    )
+
+                    if candidato_interno is not None:
+                        candidatos = [
+                            candidato_interno
+                        ]
+                    else:
+                        return (
+                            None,
+                            "ERROR_RECURSO_AMBIGUO",
+                        )
+
+                else:
+                    return (
+                        None,
+                        "ERROR_RECURSO_AMBIGUO",
+                    )
+
+            else:
                 return (
                     None,
-                    "ERROR_RECURSO_AMBIGUO",
+                    "ERROR_RECURSO_NO_ENCONTRADO",
                 )
 
-            return (
-                None,
-                "ERROR_RECURSO_NO_ENCONTRADO",
-            )
-
-        if len(candidatos_cortos) > 1:
+        if candidatos:
+            pass
+        elif len(candidatos_cortos) > 1:
 
             return (
                 None,
                 "ERROR_RECURSO_DUPLICADO",
             )
+        else:
+            candidatos = candidatos_cortos
 
-        candidatos = candidatos_cortos
+        # Si el fallback interno ya resolvió la ambigüedad, no reemplazarlo.
+        if candidatos and candidatos[0].get("metodo") == "TITULO_INTERNO_H5P_EXACTO":
+            pass
+        elif len(candidatos_cortos) > 1:
+            return (
+                None,
+                "ERROR_RECURSO_DUPLICADO",
+            )
+        elif candidatos_cortos:
+            candidatos = candidatos_cortos
 
     mejor_puntuacion = max(
         candidato["puntuacion"]
@@ -1857,6 +2041,20 @@ def obtener_terminos_busqueda_general(
     terminos = [
         nombre_original
     ]
+
+    # Comportamiento observado directamente en PRIZMA:
+    # algunos Retos aparecen con el titulo completo y desaparecen
+    # casi de inmediato por el filtrado del buscador. Al quitar
+    # una o dos letras finales se dispara una nueva busqueda y la
+    # fila vuelve a mostrarse. Replicamos ese gesto como fallback
+    # seguro. La fila NUNCA se acepta por el termino de busqueda:
+    # analizar_resultados_pagina() sigue exigiendo coincidencia
+    # exacta de nombre + semana + unidad + programa + categoria.
+    for recorte in (1, 2):
+        if len(nombre_original) > recorte + 4:
+            truncado = nombre_original[:-recorte].rstrip()
+            if truncado and truncado not in terminos:
+                terminos.append(truncado)
 
     nombre_n = normalizar_texto(
         nombre_original
