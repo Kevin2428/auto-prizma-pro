@@ -1,4 +1,4 @@
-.venv/
+﻿.venv/
 __pycache__/
 *.pyc
 
@@ -10,4 +10,15 @@ resultados/*
 !temp/.gitkeep
 !resultados/.gitkeep
 
+# Secretos y datos locales. NUNCA subir esto.
 .env
+client_secret*.json
+data/
+
+# Respaldos y versiones viejas
+*.bak
+*.bak-*
+main.py.bak*
+motor_prizma.py.bak*
+main_antes_*.py
+aplicar_*.py

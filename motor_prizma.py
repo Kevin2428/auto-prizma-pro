@@ -813,11 +813,17 @@ def validar_carpeta_drive_para_actividad(actividad):
     if not coincidencias:
         return "ERROR_RECURSO_NO_COINCIDE_CON_ACTIVIDAD"
 
+    if len(coincidencias) != 1:
+        return "ERROR_RECURSO_AMBIGUO_EN_CARPETA_DRIVE"
+
+    nombre_drive = coincidencias[0]
+    actividad["nombre_recurso_drive"] = nombre_drive
+
     print(
         "✅ Carpeta Drive validada:",
         actividad["nombre"],
         "->",
-        coincidencias[0],
+        nombre_drive,
     )
     return None
 
@@ -1172,6 +1178,124 @@ def puntuar_recurso(
 
 
 # ============================================================
+# GOOGLE DRIVE -> ZIP: VALIDACIÓN EXACTA ANTES DE PRIZMA
+# ============================================================
+
+def clave_nombre_archivo_exacto(nombre):
+    return unicodedata.normalize(
+        "NFC",
+        os.path.basename(str(nombre or "")).strip(),
+    ).casefold()
+
+
+def prevalidar_recursos_drive_zip(
+    ruta_excel,
+    ruta_zip,
+    procesar_ovi=True,
+    procesar_ova=True,
+    procesar_retos=True,
+):
+    """Valida todos los enlaces Drive y exige el mismo archivo dentro del ZIP."""
+
+    actividades = leer_actividades_excel(
+        ruta_excel,
+        procesar_ovi,
+        procesar_ova,
+        procesar_retos,
+    )
+    indice_recursos = crear_indice_recursos(ruta_zip)
+
+    errores = []
+    recursos = []
+
+    if not actividades:
+        return {
+            "ok": False,
+            "total_actividades": 0,
+            "validadas_drive": 0,
+            "errores": ["No se encontraron actividades compatibles en la matriz."],
+            "recursos": [],
+        }
+
+    if not indice_recursos:
+        return {
+            "ok": False,
+            "total_actividades": len(actividades),
+            "validadas_drive": 0,
+            "errores": ["El ZIP no contiene archivos H5P o PDF."],
+            "recursos": [],
+        }
+
+    for actividad in actividades:
+        descripcion = (
+            f'Hoja {actividad.get("hoja", "")} · '
+            f'fila {actividad.get("fila_excel", "")} · '
+            f'{actividad.get("nombre", "")}'
+        )
+
+        url_recurso = str(actividad.get("url_recurso") or "").strip()
+
+        if not url_recurso:
+            errores.append(descripcion + ": no tiene enlace de Google Drive.")
+            continue
+
+        if not extraer_id_carpeta_drive(url_recurso):
+            errores.append(
+                descripcion
+                + ": el enlace no corresponde a una carpeta válida de Google Drive."
+            )
+            continue
+
+        error_drive = validar_carpeta_drive_para_actividad(actividad)
+        if error_drive:
+            errores.append(descripcion + ": " + str(error_drive))
+            continue
+
+        nombre_drive = str(actividad.get("nombre_recurso_drive") or "").strip()
+        if not nombre_drive:
+            errores.append(
+                descripcion + ": Google Drive no permitió determinar un archivo único."
+            )
+            continue
+
+        clave_drive = clave_nombre_archivo_exacto(nombre_drive)
+        exactos = [
+            recurso
+            for recurso in indice_recursos
+            if clave_nombre_archivo_exacto(recurso.get("nombre")) == clave_drive
+        ]
+
+        if len(exactos) == 0:
+            errores.append(
+                descripcion
+                + f': Drive indica "{nombre_drive}", pero ese archivo no está en el ZIP.'
+            )
+            continue
+
+        if len(exactos) != 1:
+            errores.append(
+                descripcion
+                + f': el archivo "{nombre_drive}" aparece más de una vez en el ZIP.'
+            )
+            continue
+
+        recursos.append({
+            "hoja": actividad.get("hoja", ""),
+            "fila": actividad.get("fila_excel", 0),
+            "actividad": actividad.get("nombre", ""),
+            "archivo": nombre_drive,
+        })
+
+    return {
+        "ok": len(errores) == 0 and len(recursos) == len(actividades),
+        "total_actividades": len(actividades),
+        "validadas_drive": len(recursos),
+        "errores": errores,
+        "recursos": recursos,
+    }
+
+
+# ============================================================
 # RESOLVER RECURSO
 # ============================================================
 
@@ -1223,30 +1347,68 @@ def resolver_recurso(
 
     candidatos = []
 
-    for recurso in indice_recursos:
+    nombre_drive = str(
+        actividad.get("nombre_recurso_drive")
+        or ""
+    ).strip()
 
-        if recurso[
-            "extension"
-        ] != extension:
-            continue
+    if nombre_drive:
+        clave_drive = clave_nombre_archivo_exacto(nombre_drive)
 
-        puntuacion = puntuar_recurso(
-            recurso["nombre"],
-            actividad,
+        for recurso in indice_recursos:
+            if recurso["extension"] != extension:
+                continue
+
+            if clave_nombre_archivo_exacto(recurso["nombre"]) != clave_drive:
+                continue
+
+            candidato = recurso.copy()
+            candidato["puntuacion"] = 10000
+            candidato["metodo"] = "DRIVE_EXACTO"
+            candidatos.append(candidato)
+
+        if len(candidatos) == 0:
+            return (
+                None,
+                "ERROR_RECURSO_DRIVE_NO_ESTA_EN_ZIP",
+            )
+
+        if len(candidatos) != 1:
+            return (
+                None,
+                "ERROR_RECURSO_DUPLICADO",
+            )
+
+        print(
+            "Coincidencia exacta Drive -> ZIP:",
+            nombre_drive,
         )
 
-        if puntuacion < 100:
-            continue
+    else:
+        for recurso in indice_recursos:
 
-        candidato = recurso.copy()
+            if recurso[
+                "extension"
+            ] != extension:
+                continue
 
-        candidato[
-            "puntuacion"
-        ] = puntuacion
+            puntuacion = puntuar_recurso(
+                recurso["nombre"],
+                actividad,
+            )
 
-        candidatos.append(
-            candidato
-        )
+            if puntuacion < 100:
+                continue
+
+            candidato = recurso.copy()
+
+            candidato[
+                "puntuacion"
+            ] = puntuacion
+
+            candidatos.append(
+                candidato
+            )
 
     print(
         "Candidatos:",
