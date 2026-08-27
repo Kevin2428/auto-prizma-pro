@@ -15,6 +15,11 @@ import unicodedata
 import shutil
 import traceback
 import time
+import threading
+import html as html_lib
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 
 
 # ============================================================
@@ -580,6 +585,250 @@ def determinar_tipo_archivo(
 
 
 # ============================================================
+# VALIDACIÓN DE CARPETAS DE RECURSOS EN GOOGLE DRIVE
+# ============================================================
+
+_CACHE_CARPETAS_DRIVE = {}
+_CACHE_CARPETAS_DRIVE_LOCK = threading.Lock()
+
+
+def extraer_url_celda_recurso(celda_valor, celda_formula):
+    """Obtiene el hipervínculo real conservado en el XLSX exportado por Sheets."""
+    for celda in (celda_formula, celda_valor):
+        try:
+            if celda is not None and celda.hyperlink and celda.hyperlink.target:
+                return str(celda.hyperlink.target).strip()
+        except Exception:
+            pass
+
+    valor_formula = ""
+    try:
+        valor_formula = str(celda_formula.value or "").strip()
+    except Exception:
+        pass
+
+    coincidencia = re.search(
+        r'^\s*=\s*HYPERLINK\(\s*["\']([^"\']+)["\']',
+        valor_formula,
+        flags=re.IGNORECASE,
+    )
+    if coincidencia:
+        return coincidencia.group(1).strip()
+
+    for celda in (celda_valor, celda_formula):
+        try:
+            valor = str(celda.value or "").strip()
+        except Exception:
+            valor = ""
+        if valor.lower().startswith(("https://", "http://")):
+            return valor
+
+    return ""
+
+
+def extraer_id_carpeta_drive(url):
+    url = str(url or "").strip()
+    coincidencia = re.search(
+        r"drive\.google\.com/(?:drive/(?:u/\d+/)?folders|folders)/([A-Za-z0-9_-]+)",
+        url,
+        flags=re.IGNORECASE,
+    )
+    if not coincidencia:
+        return None
+    return coincidencia.group(1)
+
+
+def _limpiar_html_drive(texto):
+    texto = html_lib.unescape(str(texto or ""))
+    reemplazos = {
+        r"\u0026": "&",
+        r"\u003d": "=",
+        r"\u003c": "<",
+        r"\u003e": ">",
+        r"\u0027": "'",
+        r"\u0022": '"',
+    }
+    for origen, destino in reemplazos.items():
+        texto = texto.replace(origen, destino)
+    return texto
+
+
+def _extraer_nombres_archivos_drive(html_drive):
+    texto = _limpiar_html_drive(html_drive)
+    nombres = []
+    vistos = set()
+
+    # Vista embebida: los nombres suelen aparecer como texto de enlaces.
+    for contenido in re.findall(
+        r"<a[^>]*>(.*?)</a>",
+        texto,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        limpio = re.sub(r"<[^>]+>", " ", contenido)
+        limpio = html_lib.unescape(limpio)
+        limpio = " ".join(limpio.split()).strip()
+        if not limpio or "." not in limpio:
+            continue
+        if len(limpio) > 260:
+            continue
+        clave = limpio.casefold()
+        if clave not in vistos:
+            vistos.add(clave)
+            nombres.append(limpio)
+
+    # Fallback para nombres serializados en JSON/HTML.
+    for patron in [
+        r'["\']([^"\'<>\\]{1,250}\.(?:h5p|pdf|zip|docx?|xlsx?|pptx?|webm|mp4))["\']',
+        r'>([^<>]{1,250}\.(?:h5p|pdf|zip|docx?|xlsx?|pptx?|webm|mp4))<',
+    ]:
+        for nombre in re.findall(patron, texto, flags=re.IGNORECASE):
+            nombre = html_lib.unescape(" ".join(nombre.split()).strip())
+            clave = nombre.casefold()
+            if nombre and clave not in vistos:
+                vistos.add(clave)
+                nombres.append(nombre)
+
+    return nombres
+
+
+def listar_archivos_carpeta_drive(url_carpeta):
+    carpeta_id = extraer_id_carpeta_drive(url_carpeta)
+    if not carpeta_id:
+        return {
+            "ok": False,
+            "error": "ERROR_CARPETA_RECURSO_NO_ACCESIBLE",
+            "archivos": [],
+        }
+
+    with _CACHE_CARPETAS_DRIVE_LOCK:
+        cache = _CACHE_CARPETAS_DRIVE.get(carpeta_id)
+    if cache is not None:
+        return cache
+
+    urls = [
+        "https://drive.google.com/embeddedfolderview?id="
+        + quote(carpeta_id)
+        + "#list",
+        "https://drive.google.com/drive/folders/"
+        + quote(carpeta_id),
+    ]
+
+    ultimo_error = None
+    for url in urls:
+        solicitud = Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                )
+            },
+        )
+        try:
+            with urlopen(solicitud, timeout=30) as respuesta:
+                url_final = str(respuesta.geturl() or "")
+                datos = respuesta.read(8 * 1024 * 1024)
+        except (HTTPError, URLError, TimeoutError, OSError) as error:
+            ultimo_error = error
+            continue
+
+        if "accounts.google.com" in url_final.lower():
+            ultimo_error = RuntimeError("La carpeta requiere autenticación de Google")
+            continue
+
+        texto = datos.decode("utf-8", errors="ignore")
+        archivos = _extraer_nombres_archivos_drive(texto)
+
+        resultado = {
+            "ok": True,
+            "error": None,
+            "archivos": archivos,
+        }
+        with _CACHE_CARPETAS_DRIVE_LOCK:
+            if len(_CACHE_CARPETAS_DRIVE) > 500:
+                _CACHE_CARPETAS_DRIVE.clear()
+            _CACHE_CARPETAS_DRIVE[carpeta_id] = resultado
+        return resultado
+
+    print(
+        "No se pudo consultar carpeta Drive:",
+        carpeta_id,
+        type(ultimo_error).__name__ if ultimo_error else "Error",
+        str(ultimo_error or ""),
+    )
+    return {
+        "ok": False,
+        "error": "ERROR_CARPETA_RECURSO_NO_ACCESIBLE",
+        "archivos": [],
+    }
+
+
+def validar_carpeta_drive_para_actividad(actividad):
+    """
+    Si la matriz contiene un hipervínculo a una carpeta Drive, comprueba:
+    - que sea accesible;
+    - que no esté vacía;
+    - que contenga un H5P/PDF del tipo esperado que corresponda a la actividad.
+
+    Si la celda no contiene una carpeta Drive, no altera el flujo histórico del ZIP.
+    """
+    url_recurso = str(actividad.get("url_recurso") or "").strip()
+    if not url_recurso:
+        return None
+
+    if not extraer_id_carpeta_drive(url_recurso):
+        return None
+
+    resultado = listar_archivos_carpeta_drive(url_recurso)
+    if not resultado.get("ok"):
+        return resultado.get("error") or "ERROR_CARPETA_RECURSO_NO_ACCESIBLE"
+
+    archivos = resultado.get("archivos") or []
+    if not archivos:
+        return "ERROR_CARPETA_RECURSO_VACIA"
+
+    extension_objetivo = (
+        ".h5p"
+        if actividad.get("tipo_archivo") == "H5P"
+        else ".pdf"
+        if actividad.get("tipo_archivo") == "PDF"
+        else ""
+    )
+
+    compatibles = [
+        nombre
+        for nombre in archivos
+        if os.path.splitext(nombre)[1].lower() == extension_objetivo
+    ]
+
+    if not compatibles:
+        return "ERROR_RECURSO_NO_COINCIDE_CON_ACTIVIDAD"
+
+    coincidencias = []
+    for nombre in compatibles:
+        puntuacion = puntuar_recurso(nombre, actividad)
+        if puntuacion >= 100 or recurso_es_prefijo_de_actividad(nombre, actividad):
+            coincidencias.append(nombre)
+
+    if not coincidencias:
+        return "ERROR_RECURSO_NO_COINCIDE_CON_ACTIVIDAD"
+
+    if len(coincidencias) != 1:
+        return "ERROR_RECURSO_AMBIGUO_EN_CARPETA_DRIVE"
+
+    nombre_drive = coincidencias[0]
+    actividad["nombre_recurso_drive"] = nombre_drive
+
+    print(
+        "✅ Carpeta Drive validada:",
+        actividad["nombre"],
+        "->",
+        nombre_drive,
+    )
+    return None
+
+
+# ============================================================
 # LEER ACTIVIDADES DEL EXCEL
 # ============================================================
 
@@ -594,12 +843,19 @@ def leer_actividades_excel(
         ruta_excel,
         data_only=True,
     )
+    libro_formulas = load_workbook(
+        ruta_excel,
+        data_only=False,
+    )
 
     actividades = []
 
     for nombre_hoja in libro.sheetnames:
 
         hoja = libro[
+            nombre_hoja
+        ]
+        hoja_formulas = libro_formulas[
             nombre_hoja
         ]
 
@@ -690,10 +946,19 @@ def leer_actividades_excel(
                 column=6,
             ).value
 
-            enlace = hoja.cell(
+            celda_enlace = hoja.cell(
                 row=fila,
                 column=7,
-            ).value
+            )
+            celda_enlace_formula = hoja_formulas.cell(
+                row=fila,
+                column=7,
+            )
+            enlace = celda_enlace.value
+            url_recurso = extraer_url_celda_recurso(
+                celda_enlace,
+                celda_enlace_formula,
+            )
 
             if not nombre:
                 continue
@@ -779,6 +1044,8 @@ def leer_actividades_excel(
                         if enlace
                         else ""
                     ),
+
+                    "url_recurso": url_recurso,
                 }
             )
 
@@ -911,6 +1178,124 @@ def puntuar_recurso(
 
 
 # ============================================================
+# GOOGLE DRIVE -> ZIP: VALIDACIÓN EXACTA ANTES DE PRIZMA
+# ============================================================
+
+def clave_nombre_archivo_exacto(nombre):
+    return unicodedata.normalize(
+        "NFC",
+        os.path.basename(str(nombre or "")).strip(),
+    ).casefold()
+
+
+def prevalidar_recursos_drive_zip(
+    ruta_excel,
+    ruta_zip,
+    procesar_ovi=True,
+    procesar_ova=True,
+    procesar_retos=True,
+):
+    """Valida todos los enlaces Drive y exige el mismo archivo dentro del ZIP."""
+
+    actividades = leer_actividades_excel(
+        ruta_excel,
+        procesar_ovi,
+        procesar_ova,
+        procesar_retos,
+    )
+    indice_recursos = crear_indice_recursos(ruta_zip)
+
+    errores = []
+    recursos = []
+
+    if not actividades:
+        return {
+            "ok": False,
+            "total_actividades": 0,
+            "validadas_drive": 0,
+            "errores": ["No se encontraron actividades compatibles en la matriz."],
+            "recursos": [],
+        }
+
+    if not indice_recursos:
+        return {
+            "ok": False,
+            "total_actividades": len(actividades),
+            "validadas_drive": 0,
+            "errores": ["El ZIP no contiene archivos H5P o PDF."],
+            "recursos": [],
+        }
+
+    for actividad in actividades:
+        descripcion = (
+            f'Hoja {actividad.get("hoja", "")} · '
+            f'fila {actividad.get("fila_excel", "")} · '
+            f'{actividad.get("nombre", "")}'
+        )
+
+        url_recurso = str(actividad.get("url_recurso") or "").strip()
+
+        if not url_recurso:
+            errores.append(descripcion + ": no tiene enlace de Google Drive.")
+            continue
+
+        if not extraer_id_carpeta_drive(url_recurso):
+            errores.append(
+                descripcion
+                + ": el enlace no corresponde a una carpeta válida de Google Drive."
+            )
+            continue
+
+        error_drive = validar_carpeta_drive_para_actividad(actividad)
+        if error_drive:
+            errores.append(descripcion + ": " + str(error_drive))
+            continue
+
+        nombre_drive = str(actividad.get("nombre_recurso_drive") or "").strip()
+        if not nombre_drive:
+            errores.append(
+                descripcion + ": Google Drive no permitió determinar un archivo único."
+            )
+            continue
+
+        clave_drive = clave_nombre_archivo_exacto(nombre_drive)
+        exactos = [
+            recurso
+            for recurso in indice_recursos
+            if clave_nombre_archivo_exacto(recurso.get("nombre")) == clave_drive
+        ]
+
+        if len(exactos) == 0:
+            errores.append(
+                descripcion
+                + f': Drive indica "{nombre_drive}", pero ese archivo no está en el ZIP.'
+            )
+            continue
+
+        if len(exactos) != 1:
+            errores.append(
+                descripcion
+                + f': el archivo "{nombre_drive}" aparece más de una vez en el ZIP.'
+            )
+            continue
+
+        recursos.append({
+            "hoja": actividad.get("hoja", ""),
+            "fila": actividad.get("fila_excel", 0),
+            "actividad": actividad.get("nombre", ""),
+            "archivo": nombre_drive,
+        })
+
+    return {
+        "ok": len(errores) == 0 and len(recursos) == len(actividades),
+        "total_actividades": len(actividades),
+        "validadas_drive": len(recursos),
+        "errores": errores,
+        "recursos": recursos,
+    }
+
+
+# ============================================================
 # RESOLVER RECURSO
 # ============================================================
 
@@ -962,30 +1347,68 @@ def resolver_recurso(
 
     candidatos = []
 
-    for recurso in indice_recursos:
+    nombre_drive = str(
+        actividad.get("nombre_recurso_drive")
+        or ""
+    ).strip()
 
-        if recurso[
-            "extension"
-        ] != extension:
-            continue
+    if nombre_drive:
+        clave_drive = clave_nombre_archivo_exacto(nombre_drive)
 
-        puntuacion = puntuar_recurso(
-            recurso["nombre"],
-            actividad,
+        for recurso in indice_recursos:
+            if recurso["extension"] != extension:
+                continue
+
+            if clave_nombre_archivo_exacto(recurso["nombre"]) != clave_drive:
+                continue
+
+            candidato = recurso.copy()
+            candidato["puntuacion"] = 10000
+            candidato["metodo"] = "DRIVE_EXACTO"
+            candidatos.append(candidato)
+
+        if len(candidatos) == 0:
+            return (
+                None,
+                "ERROR_RECURSO_DRIVE_NO_ESTA_EN_ZIP",
+            )
+
+        if len(candidatos) != 1:
+            return (
+                None,
+                "ERROR_RECURSO_DUPLICADO",
+            )
+
+        print(
+            "Coincidencia exacta Drive -> ZIP:",
+            nombre_drive,
         )
 
-        if puntuacion < 100:
-            continue
+    else:
+        for recurso in indice_recursos:
 
-        candidato = recurso.copy()
+            if recurso[
+                "extension"
+            ] != extension:
+                continue
 
-        candidato[
-            "puntuacion"
-        ] = puntuacion
+            puntuacion = puntuar_recurso(
+                recurso["nombre"],
+                actividad,
+            )
 
-        candidatos.append(
-            candidato
-        )
+            if puntuacion < 100:
+                continue
+
+            candidato = recurso.copy()
+
+            candidato[
+                "puntuacion"
+            ] = puntuacion
+
+            candidatos.append(
+                candidato
+            )
 
     print(
         "Candidatos:",
@@ -3666,7 +4089,20 @@ def procesar_actividad(
 
     print("======================================")
 
-    # 1. RECURSO
+    # 1. VALIDAR CARPETA DE RECURSO EN GOOGLE DRIVE (SI EXISTE)
+
+    error_carpeta = validar_carpeta_drive_para_actividad(
+        actividad
+    )
+
+    if error_carpeta:
+        return {
+            "ok": False,
+            "error": error_carpeta,
+            "recurso": "",
+        }
+
+    # 2. RECURSO DEL ZIP
 
     recurso, error = resolver_recurso(
         actividad,
