@@ -2465,20 +2465,6 @@ def obtener_terminos_busqueda_general(
         nombre_original
     ]
 
-    # Comportamiento observado directamente en PRIZMA:
-    # algunos Retos aparecen con el titulo completo y desaparecen
-    # casi de inmediato por el filtrado del buscador. Al quitar
-    # una o dos letras finales se dispara una nueva busqueda y la
-    # fila vuelve a mostrarse. Replicamos ese gesto como fallback
-    # seguro. La fila NUNCA se acepta por el termino de busqueda:
-    # analizar_resultados_pagina() sigue exigiendo coincidencia
-    # exacta de nombre + semana + unidad + programa + categoria.
-    for recorte in (1, 2):
-        if len(nombre_original) > recorte + 4:
-            truncado = nombre_original[:-recorte].rstrip()
-            if truncado and truncado not in terminos:
-                terminos.append(truncado)
-
     nombre_n = normalizar_texto(
         nombre_original
     )
@@ -2542,6 +2528,16 @@ def obtener_terminos_busqueda_reto(
     terminos = [
         nombre_original
     ]
+
+    # Fallback específico para Retos Evaluativos. PRIZMA puede mostrar
+    # la fila al repetir la búsqueda quitando una o dos letras finales.
+    # La fila solo se acepta después con validación exacta de nombre,
+    # semana, unidad, programa y categoría.
+    for recorte in (1, 2):
+        if len(nombre_original) > recorte + 4:
+            truncado = nombre_original[:-recorte].rstrip()
+            if truncado and truncado not in terminos:
+                terminos.append(truncado)
 
     nombre_n = normalizar_texto(
         nombre_original
@@ -2681,8 +2677,14 @@ def buscar_actividad_correcta(
             termino_busqueda
         )
 
+        espera_busqueda = (
+            4200
+            if actividad["categoria_prizma"] == "CHALLENGE"
+            else 2600
+        )
+
         pagina.wait_for_timeout(
-            2600
+            espera_busqueda
         )
 
         asegurar_pagina_1(
@@ -2861,9 +2863,22 @@ def buscar_actividad_correcta(
     pagina.wait_for_timeout(500)
     asegurar_pagina_1(pagina)
     buscador.fill(termino_encontrado)
-    pagina.wait_for_timeout(1800)
+
+    espera_recuperacion = (
+        3200
+        if actividad["categoria_prizma"] == "CHALLENGE"
+        else 1800
+    )
+    pagina.wait_for_timeout(espera_recuperacion)
+
     asegurar_pagina_1(pagina)
-    pagina.wait_for_timeout(700)
+
+    espera_estabilizacion = (
+        1000
+        if actividad["categoria_prizma"] == "CHALLENGE"
+        else 700
+    )
+    pagina.wait_for_timeout(espera_estabilizacion)
 
     firmas_recuperacion = set()
     numero_recuperacion = 1
