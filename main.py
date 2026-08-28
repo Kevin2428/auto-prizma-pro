@@ -55,6 +55,7 @@ import re
 import unicodedata
 import threading
 import shutil
+import time
 import hmac
 import base64
 import hashlib
@@ -764,7 +765,16 @@ def _resolver_hoja_objetivo(url_google_sheet):
         if str(propiedades.get("sheetId")) == gid:
             titulo = str(propiedades.get("title") or "").strip()
             if titulo:
-                print("Hoja objetivo: gid=" + gid + " -> '" + titulo + "'")
+                aviso = ""
+                if len(titulo) > LIMITE_NOMBRE_HOJA_XLSX:
+                    aviso = (
+                        "  (en el XLSX llega recortada como '"
+                        + titulo[:LIMITE_NOMBRE_HOJA_XLSX] + "')"
+                    )
+                print(
+                    "Hoja objetivo: gid=" + gid + " -> '" + titulo + "'"
+                    + aviso
+                )
                 return titulo
 
     raise ValueError(
@@ -773,10 +783,28 @@ def _resolver_hoja_objetivo(url_google_sheet):
     )
 
 
+# Excel limita el nombre de una pestana a 31 caracteres. Cuando Google
+# Sheets exporta a XLSX, cualquier pestana con un titulo mas largo llega
+# RECORTADA. Por eso el nombre que devuelve la API de Sheets y el que trae
+# el XLSX no siempre son iguales, y hay que compararlos por su recorte.
+LIMITE_NOMBRE_HOJA_XLSX = 31
+
+
+def _clave_hoja(nombre):
+    """Identidad de una pestana, resistente al recorte del XLSX."""
+    return normalizar_texto(
+        str(nombre or "")[:LIMITE_NOMBRE_HOJA_XLSX]
+    )
+
+
 def _misma_hoja(nombre_hoja, hoja_objetivo):
     if not hoja_objetivo:
         return True
-    return normalizar_texto(nombre_hoja) == normalizar_texto(hoja_objetivo)
+
+    if normalizar_texto(nombre_hoja) == normalizar_texto(hoja_objetivo):
+        return True
+
+    return _clave_hoja(nombre_hoja) == _clave_hoja(hoja_objetivo)
 
 
 def _extraer_spreadsheet_id(url_google_sheet):
@@ -883,6 +911,11 @@ def _leer_enlaces_columna_g_google_sheet(url_google_sheet, hoja_objetivo=None):
         ]
 
     if not titulos:
+        print(
+            "AVISO: ninguna pestana coincidio con '"
+            + str(hoja_objetivo or "")
+            + "'. No se leyeron enlaces de la columna G."
+        )
         return {}
 
     rangos = [
@@ -915,7 +948,11 @@ def _leer_enlaces_columna_g_google_sheet(url_google_sheet, hoja_objetivo=None):
                     continue
                 url_drive = _url_desde_cell_data(valores[0])
                 if url_drive:
-                    enlaces_drive[(titulo, inicio + offset + 1)] = url_drive
+                    # La clave usa el recorte porque las actividades vienen
+                    # del XLSX, donde el nombre puede llegar cortado.
+                    enlaces_drive[
+                        (_clave_hoja(titulo), inicio + offset + 1)
+                    ] = url_drive
 
     print(
         "Sheets SOLO ENLACES:",
@@ -1947,6 +1984,8 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
             "_mapa_resueltos": {},
         }
 
+    _t0 = time.perf_counter()
+
     # Fuente unica de Drive: columna G leida directamente por Sheets API.
     enlaces_drive = _leer_enlaces_columna_g_google_sheet(
         url_google_sheet,
@@ -1956,7 +1995,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
     actividades_con_drive = []
     for actividad in actividades:
         clave_fila = (
-            str(actividad.get("hoja") or ""),
+            _clave_hoja(actividad.get("hoja")),
             int(actividad.get("fila_excel") or 0),
         )
         url_drive = str(enlaces_drive.get(clave_fila) or "").strip()
@@ -1964,9 +2003,13 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         if url_drive:
             actividades_con_drive.append(actividad)
 
+    _t1 = time.perf_counter()
+
     # Precarga por lotes SOLO las filas realmente enlazadas a Drive.
     if actividades_con_drive:
         _precargar_referencias_drive_batch(actividades_con_drive)
+
+    _t2 = time.perf_counter()
 
     errores = []
     advertencias = []
@@ -2385,6 +2428,14 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         "ZIP indexado:",
         indice_zip["total"],
         "archivo(s) .h5p/.pdf",
+    )
+
+    print(
+        "TIEMPOS:",
+        f"columna G {_t1 - _t0:.1f}s |",
+        f"lectura Drive {_t2 - _t1:.1f}s |",
+        f"comparacion ZIP {time.perf_counter() - _t2:.1f}s |",
+        f"total {time.perf_counter() - _t0:.1f}s",
     )
 
     print(
@@ -5778,7 +5829,7 @@ def _pagina_registros(tipo="historial"):
                 f'<td class="archivo-reporte" title="{html.escape(archivo, quote=True)}">{html.escape(archivo)}</td>'
                 f'<td>{html.escape(curso)}</td>'
                 f'<td>{html.escape(programa)}</td>'
-                f'<td class="accion-celda"><a class="boton-reporte" href="/reporte-guardado/{registro_id}">⇩ <span>Descargar</span></a></td>'
+                f'<td class="accion-celda"><a class="boton-reporte" href="/reporte-guardado/{registro_id}">◉ <span>Ver</span></a> <a class="boton-reporte" href="/reporte-guardado/{registro_id}?descargar=1">⇩ <span>CSV</span></a></td>'
                 '</tr>'
             )
 
@@ -5876,8 +5927,195 @@ def reportes_generados():
     return _pagina_registros("reportes")
 
 
+def _leer_reporte_csv(ruta):
+    """Devuelve (cabeceras, filas) del CSV del reporte."""
+    with open(ruta, "r", encoding="utf-8-sig", newline="") as archivo:
+        lector = csv.reader(archivo)
+        filas = [fila for fila in lector if any(str(c).strip() for c in fila)]
+
+    if not filas:
+        return [], []
+
+    return filas[0], filas[1:]
+
+
+def _clase_resultado(valor):
+    """Color segun el resultado de la fila."""
+    texto = normalizar_texto(valor)
+
+    if "cargad" in texto or "exito" in texto or texto == "ok":
+        return ("#ecfdf3", "#067647", "#abefc6")
+
+    if "omitid" in texto or "ya exist" in texto or "duplicad" in texto:
+        return ("#fffaeb", "#b54708", "#fedf89")
+
+    if "cancel" in texto:
+        return ("#f2f4f7", "#475467", "#e4e7ec")
+
+    return ("#fef3f2", "#b42318", "#fecdca")
+
+
+def _pagina_reporte_html(titulo, subtitulo, ruta_csv, url_descarga):
+    """Muestra el reporte como tabla dentro de la app."""
+
+    def e(valor):
+        return html.escape(str(valor or ""))
+
+    try:
+        cabeceras, filas = _leer_reporte_csv(ruta_csv)
+    except OSError:
+        cabeceras, filas = [], []
+
+    # Indice de la columna Resultado, para colorear y contar.
+    indice_resultado = None
+    for posicion, nombre in enumerate(cabeceras):
+        if normalizar_texto(nombre) == normalizar_texto("Resultado"):
+            indice_resultado = posicion
+            break
+
+    conteo = {}
+    filas_html = ""
+
+    for fila in filas:
+        resultado = ""
+        if indice_resultado is not None and indice_resultado < len(fila):
+            resultado = str(fila[indice_resultado] or "").strip()
+
+        conteo[resultado or "—"] = conteo.get(resultado or "—", 0) + 1
+        fondo, letra, borde = _clase_resultado(resultado)
+
+        celdas = ""
+        for posicion, valor in enumerate(fila):
+            if posicion == indice_resultado:
+                celdas += (
+                    '<td style="white-space:nowrap;">'
+                    '<span style="display:inline-block;padding:3px 10px;'
+                    'border-radius:999px;font-size:11px;font-weight:800;'
+                    'background:' + fondo + ';color:' + letra + ';'
+                    'border:1px solid ' + borde + ';">'
+                    + e(valor) + "</span></td>"
+                )
+            else:
+                celdas += (
+                    '<td style="padding:9px 14px;border-bottom:1px solid #f2f4f7;'
+                    'color:#475467;vertical-align:top;">' + e(valor) + "</td>"
+                )
+
+        filas_html += (
+            '<tr>' + celdas.replace(
+                '<td style="white-space:nowrap;">',
+                '<td style="white-space:nowrap;padding:9px 14px;'
+                'border-bottom:1px solid #f2f4f7;vertical-align:top;">',
+            ) + "</tr>"
+        )
+
+    encabezados_html = "".join(
+        '<th style="text-align:left;padding:10px 14px;font-size:11px;'
+        'letter-spacing:.03em;color:#667085;background:#f9fafb;'
+        'border-bottom:1px solid #e4e7ec;position:sticky;top:0;">'
+        + e(nombre).upper() + "</th>"
+        for nombre in cabeceras
+    )
+
+    tarjetas = ""
+    for valor, cantidad in sorted(
+        conteo.items(), key=lambda par: -par[1]
+    ):
+        fondo, letra, borde = _clase_resultado(valor)
+        tarjetas += (
+            '<div style="background:' + fondo + ';border:1px solid ' + borde
+            + ';border-radius:12px;padding:12px 16px;min-width:120px;">'
+            '<div style="font-size:22px;font-weight:800;color:' + letra + ';">'
+            + str(cantidad) + "</div>"
+            '<div style="font-size:11.5px;color:#667085;margin-top:2px;">'
+            + e(valor) + "</div></div>"
+        )
+
+    if not filas:
+        cuerpo = (
+            '<div style="padding:48px 24px;text-align:center;color:#667085;">'
+            "El reporte no tiene filas todavía.</div>"
+        )
+    else:
+        cuerpo = (
+            '<div style="overflow:auto;max-height:62vh;">'
+            '<table style="width:100%;border-collapse:collapse;font-size:12.5px;">'
+            "<thead><tr>" + encabezados_html + "</tr></thead>"
+            "<tbody>" + filas_html + "</tbody></table></div>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="es"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{e(titulo)} - Auto Prizma Pro</title>
+<style>
+:root{{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef}}
+*{{box-sizing:border-box}}
+body{{margin:0;font-family:Inter,ui-sans-serif,-apple-system,"Segoe UI",sans-serif;
+background:var(--fondo);color:var(--texto)}}
+.app{{min-height:100vh;display:grid;grid-template-columns:235px 1fr}}
+.sidebar{{height:100vh;background:#fff;border-right:1px solid var(--borde);
+padding:28px 20px;display:flex;flex-direction:column}}
+.marca{{display:flex;align-items:center;gap:12px;margin-bottom:34px}}
+.logo{{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;
+background:linear-gradient(145deg,#6d5dfc,#4338ca)}}
+.logo svg{{width:29px;height:29px}}
+.logo svg path:first-child{{fill:#fff}}.logo svg path:last-child{{fill:#c7d2fe}}
+.marca strong{{display:block;font-size:18px}}
+.marca span{{display:block;color:var(--muted);font-size:12px;margin-top:3px}}
+.nav{{display:grid;gap:8px}}
+.nav-item{{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;
+display:flex;gap:11px;align-items:center;text-decoration:none}}
+.nav-item:hover{{background:#f7f5ff;color:#4f46e5}}
+.nav-item.activo{{background:#f1efff;color:#4f46e5;font-weight:700}}
+.contenido{{padding:30px 34px 44px;min-width:0}}
+.panel{{background:#fff;border:1px solid var(--borde);border-radius:18px;
+box-shadow:0 10px 30px rgba(29,41,57,.05);overflow:hidden}}
+.cabecera{{display:flex;justify-content:space-between;gap:18px;
+align-items:flex-start;margin-bottom:20px;flex-wrap:wrap}}
+.cabecera h1{{font-size:26px;margin:0 0 6px}}
+.cabecera p{{margin:0;color:var(--muted);font-size:13.5px}}
+.acciones{{display:flex;gap:10px;flex-wrap:wrap}}
+.boton{{display:inline-flex;align-items:center;gap:8px;padding:11px 16px;
+border-radius:10px;text-decoration:none;font-size:13px;font-weight:700}}
+.boton-primario{{background:linear-gradient(90deg,#5548e8,#6546e8);color:#fff}}
+.boton-secundario{{background:#fff;color:#4f46e5;border:1px solid #d8d6f8}}
+.tarjetas{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}}
+tbody tr:hover{{background:#fafaff}}
+</style><link rel="stylesheet" href="/estilos-responsive.css"></head>
+<body><div class="app">
+<aside class="sidebar">
+  <div class="marca">
+    <div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div>
+    <div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div>
+  </div>
+  <nav class="nav">
+    <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
+    <a class="nav-item" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
+    <a class="nav-item" href="/historial">◷ <span>Historial</span></a>
+    <a class="nav-item activo" href="/reportes">▥ <span>Reportes</span></a>
+    <a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a>
+    <a class="nav-item" href="/salir">⏻ <span>Salir</span></a>
+  </nav>
+</aside>
+<main class="contenido">
+  <section class="cabecera">
+    <div>
+      <h1>{e(titulo)}</h1>
+      <p>{e(subtitulo)}</p>
+    </div>
+    <div class="acciones">
+      <a class="boton boton-secundario" href="/reportes">← Volver</a>
+      <a class="boton boton-primario" href="{e(url_descarga)}">⇩ Descargar CSV</a>
+    </div>
+  </section>
+  <div class="tarjetas">{tarjetas}</div>
+  <div class="panel">{cuerpo}</div>
+</main></div></body></html>"""
+
+
 @app.get("/reporte-guardado/{registro_id}")
-def descargar_reporte_guardado(registro_id: str):
+def descargar_reporte_guardado(registro_id: str, descargar: int = 0):
     registro = next(
         (
             r for r in _historial_del_usuario()
@@ -5895,7 +6133,28 @@ def descargar_reporte_guardado(registro_id: str):
     if not nombre or not os.path.isfile(ruta):
         return JSONResponse({"error": "El archivo del reporte ya no está disponible"}, status_code=404)
 
-    return FileResponse(ruta, media_type="text/csv", filename=nombre)
+    if descargar:
+        return FileResponse(ruta, media_type="text/csv", filename=nombre)
+
+    cursos = registro.get("cursos") or []
+    if cursos:
+        titulo = str(cursos[0].get("curso") or "Reporte del cargue")
+        subtitulo = " · ".join(
+            filter(None, [
+                str(cursos[0].get("programa") or ""),
+                _formatear_fecha_hora(registro.get("fecha_iso"))[0],
+            ])
+        )
+    else:
+        titulo = "Reporte del cargue"
+        subtitulo = _formatear_fecha_hora(registro.get("fecha_iso"))[0]
+
+    return HTMLResponse(_pagina_reporte_html(
+        titulo,
+        subtitulo,
+        ruta,
+        "/reporte-guardado/" + registro_id + "?descargar=1",
+    ))
 
 
 # ============================================================
@@ -5907,6 +6166,7 @@ def descargar_reporte_guardado(registro_id: str):
 )
 def descargar_reporte(
     trabajo_id: str,
+    descargar: int = 0,
 ):
 
     trabajo = TRABAJOS.get(
@@ -5939,8 +6199,26 @@ def descargar_reporte(
             status_code=404,
         )
 
-    return FileResponse(
-        ruta,
-        media_type="text/csv",
-        filename=os.path.basename(ruta),
+    if descargar:
+        return FileResponse(
+            ruta,
+            media_type="text/csv",
+            filename=os.path.basename(ruta),
+        )
+
+    cursos = trabajo.get("cursos") or []
+    titulo = (
+        str(cursos[0].get("curso") or "Reporte del cargue")
+        if cursos else "Reporte del cargue"
     )
+    subtitulo = (
+        str(trabajo.get("mensaje") or "")
+        or "Resultado del cargue en PRIZMA"
+    )
+
+    return HTMLResponse(_pagina_reporte_html(
+        titulo,
+        subtitulo,
+        ruta,
+        "/reporte/" + trabajo_id + "?descargar=1",
+    ))
