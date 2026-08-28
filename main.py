@@ -4176,110 +4176,13 @@ def google_conectar():
 
         flow.redirect_uri = redirect_uri
 
-        authorization_url, state = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
+        authorization_response = (
+            redirect_uri
+            + ("?" + request.url.query if request.url.query else "")
         )
-
-        code_verifier = flow.code_verifier
-
-        if not code_verifier:
-            raise RuntimeError(
-                "Google OAuth no generó el verificador PKCE."
-            )
-
-        with GOOGLE_OAUTH_LOCK:
-            GOOGLE_OAUTH_STATES[state] = (
-                code_verifier,
-                _usuario_actual(),
-            )
-
-        return RedirectResponse(
-            authorization_url,
-            status_code=302,
-        )
-
-    except Exception as error:
-        return HTMLResponse(
-            generar_html(
-                error=(
-                    "No se pudo iniciar la conexión con Google. "
-                    + str(error)
-                )
-            ),
-            status_code=500,
-        )
-
-
-@app.get("/google/callback")
-def google_callback(
-    request: FastAPIRequest,
-    state: str = "",
-    error: str | None = None,
-):
-    if error:
-        return HTMLResponse(
-            generar_html(
-                error=(
-                    "Google no autorizó la conexión: "
-                    + str(error)
-                )
-            ),
-            status_code=400,
-        )
-
-    with GOOGLE_OAUTH_LOCK:
-        guardado = GOOGLE_OAUTH_STATES.pop(
-            state,
-            None,
-        )
-
-    code_verifier, usuario_del_flujo = (
-        guardado if guardado else (None, None)
-    )
-
-    # El token debe quedar en la cuenta que inicio el flujo, no en
-    # la que tenga la sesion abierta en este momento.
-    if usuario_del_flujo and usuario_del_flujo != _usuario_actual():
-        return HTMLResponse(
-            generar_html(
-                error=(
-                    "La autorización de Google se inició con otra sesión. "
-                    "Vuelve a intentarlo desde tu propia cuenta."
-                )
-            ),
-            status_code=400,
-        )
-
-    if not code_verifier:
-        return HTMLResponse(
-            generar_html(
-                error=(
-                    "La respuesta de Google no pudo validarse. "
-                    "Vuelve a iniciar la conexión."
-                )
-            ),
-            status_code=400,
-        )
-
-    try:
-        client_config, redirect_uri = _google_client_config()
-
-        flow = Flow.from_client_config(
-            client_config,
-            scopes=GOOGLE_SCOPES,
-            state=state,
-            code_verifier=code_verifier,
-            autogenerate_code_verifier=False,
-        )
-
-        flow.redirect_uri = redirect_uri
 
         flow.fetch_token(
-            authorization_response=str(
-                request.url
-            )
+            authorization_response=authorization_response
         )
 
         _guardar_credenciales_google(
