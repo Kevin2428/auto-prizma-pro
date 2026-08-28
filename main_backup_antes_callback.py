@@ -30,12 +30,6 @@ from googleapiclient.http import MediaIoBaseDownload
 
 import motor_prizma as motor_prizma_modulo
 
-from drive_resource_policy import (
-    choose_drive_item,
-    match_drive_resource_to_zip,
-    detect_duplicate_assignments,
-)
-
 from motor_prizma import (
     ejecutar_cargue,
     validar_credenciales_prizma,
@@ -733,11 +727,7 @@ def _resolver_hoja_objetivo(url_google_sheet):
     """
     gid = _extraer_gid(url_google_sheet)
     if not gid:
-        raise ValueError(
-            "El enlace de Google Sheets no identifica una pestaña concreta (falta gid). "
-            "Abre la hoja que quieres procesar y copia el enlace desde esa pestaña. "
-            "Auto Prizma no procesará todas las hojas como fallback."
-        )
+        return None
 
     spreadsheet_id = _extraer_spreadsheet_id(url_google_sheet)
     if not spreadsheet_id:
@@ -1562,39 +1552,6 @@ def _clave_nombre_flexible(nombre):
     return texto.casefold()
 
 
-_MIME_H5P_DRIVE = {
-    "application/x-zip",
-    "application/zip",
-    "application/x-h5p",
-    "application/vnd.h5p",
-}
-
-
-def _extension_recurso_drive(item, actividad):
-    """Determina el tipo cargable de un item Drive sin descargarlo.
-
-    Google Drive puede devolver un H5P como ``application/x-zip`` y, en
-    algunos casos, el nombre visible llega sin ``.h5p``. La matriz sigue
-    siendo la autoridad para el tipo esperado; el MIME solo completa la
-    extension cuando Drive no la conserva en el nombre.
-    """
-    nombre = str((item or {}).get("nombre") or (item or {}).get("name") or "").strip()
-    mime_type = str((item or {}).get("mimeType") or "").strip().lower()
-    tipo = str((actividad or {}).get("tipo_archivo") or "").strip().upper()
-    extension = os.path.splitext(nombre)[1].lower()
-
-    if extension in (".h5p", ".pdf"):
-        return extension
-
-    if tipo == "H5P" and mime_type in _MIME_H5P_DRIVE:
-        return ".h5p"
-
-    if tipo == "PDF" and mime_type == "application/pdf":
-        return ".pdf"
-
-    return ""
-
-
 def _indice_zip_nombre_tamano(ruta_zip):
     """Indexa el ZIP por nombre exacto y por nombre equivalente."""
     indice = {
@@ -1635,53 +1592,31 @@ def _indice_zip_nombre_tamano(ruta_zip):
     return indice
 
 
-def _buscar_en_zip(indice_zip, nombre_drive, tamano_drive, extension_esperada=""):
-    """Empareja UN archivo de Drive contra el ZIP sin exigir bytes identicos.
+def _buscar_en_zip(indice_zip, nombre_drive, tamano_drive):
+    """Empareja UN archivo de Drive contra el ZIP.
 
-    La identidad primaria es el nombre unico del recurso. El tamano se usa
-    solamente como desempate cuando el ZIP contiene mas de una copia con el
-    mismo nombre. Esto evita falsos negativos cuando Drive contiene otra
-    revision/binario del mismo H5P, sin permitir elecciones ambiguas.
-
-    Si Drive omite la extension pero el MIME + la matriz confirman el tipo,
-    se prueba tambien el nombre con ``extension_esperada``.
+    Devuelve (estado, entradas):
+      "ok"              -> entradas = [entrada unica del ZIP]
+      "duplicado"       -> el ZIP tiene varias copias distintas iguales en nombre+tamano
+      "tamano_distinto" -> el nombre existe en el ZIP pero con otro tamano
+      "sin_nombre"      -> ese nombre no existe en el ZIP
     """
-    nombre_drive = _nombre_base_archivo(nombre_drive)
-    extension_esperada = str(extension_esperada or "").strip().lower()
-
-    nombres_busqueda = [nombre_drive]
-    extension_actual = os.path.splitext(nombre_drive)[1].lower()
-
-    if extension_esperada in (".h5p", ".pdf") and extension_actual != extension_esperada:
-        if not extension_actual:
-            nombres_busqueda.append(nombre_drive + extension_esperada)
-        elif extension_actual == ".zip" and extension_esperada == ".h5p":
-            nombres_busqueda.append(os.path.splitext(nombre_drive)[0] + ".h5p")
-
-    candidatos = []
-    for nombre in dict.fromkeys(nombres_busqueda):
-        encontrados = list(
-            indice_zip["exacto"].get(_clave_nombre_drive_zip(nombre), [])
-        )
-        if not encontrados:
-            encontrados = list(
-                indice_zip["flexible"].get(_clave_nombre_flexible(nombre), [])
-            )
-        if encontrados:
-            candidatos = encontrados
-            break
-
-    if not candidatos:
-        return "sin_nombre", []
-
-    # Un nombre unico es suficiente: el tamano de Drive no define identidad.
-    if len(candidatos) == 1:
-        return "ok", candidatos
-
     try:
         tamano_drive = int(tamano_drive)
     except (TypeError, ValueError):
-        return "duplicado", candidatos
+        return "sin_nombre", []
+
+    candidatos = list(
+        indice_zip["exacto"].get(_clave_nombre_drive_zip(nombre_drive), [])
+    )
+
+    if not candidatos:
+        candidatos = list(
+            indice_zip["flexible"].get(_clave_nombre_flexible(nombre_drive), [])
+        )
+
+    if not candidatos:
+        return "sin_nombre", []
 
     iguales = [
         entrada for entrada in candidatos
@@ -1697,7 +1632,7 @@ def _buscar_en_zip(indice_zip, nombre_drive, tamano_drive, extension_esperada=""
             return "ok", iguales[:1]
         return "duplicado", iguales
 
-    return "duplicado", candidatos
+    return "tamano_distinto", candidatos
 
 
 def _desempatar_por_tipo_declarado(actividad, coincidencias):
@@ -1712,7 +1647,7 @@ def _desempatar_por_tipo_declarado(actividad, coincidencias):
 
     filtradas = [
         par for par in coincidencias
-        if os.path.splitext(str(par[1].get("nombre") or ""))[1].lower() == extension
+        if os.path.splitext(str(par[0].get("nombre") or ""))[1].lower() == extension
     ]
 
     return filtradas if len(filtradas) == 1 else coincidencias
@@ -1754,96 +1689,6 @@ def _explicar_fallas_drive_zip(fallas):
         partes.append("el ZIP no contiene " + nombres + extra)
 
     return "; ".join(partes) + "."
-
-
-ETIQUETAS_AVISO = {
-    "SIZE_MISMATCH": "Tamano distinto",
-    "NAME_MISMATCH_SIZE_MATCH": "Nombre distinto",
-    "NAME_MISMATCH_ACTIVITY_FALLBACK": "Nombre distinto",
-    "IDENTICAL_ZIP_DUPLICATE": "Copia repetida en el ZIP",
-    "IDENTICAL_DRIVE_DUPLICATE": "Copia repetida en Drive",
-    "CROSS_ACTIVITY_DUPLICATE": "Recurso en varias filas",
-    "SIN_EQUIVALENTE_ZIP": "Sin equivalente en el ZIP",
-}
-
-# Orden de gravedad: lo que mas conviene revisar va primero.
-PRIORIDAD_AVISO = {
-    "Sin equivalente en el ZIP": 0,
-    "Tamano distinto": 1,
-    "Recurso en varias filas": 2,
-    "Copia repetida en el ZIP": 3,
-    "Copia repetida en Drive": 4,
-    "Nombre distinto": 5,
-}
-
-
-def _numeros_legibles(mensaje):
-    """Pone separador de miles a los tamanos que vienen en crudo."""
-    return re.sub(
-        r"(\d{4,})(?=\s*bytes)",
-        lambda m: f"{int(m.group(1)):,}".replace(",", "."),
-        str(mensaje or ""),
-    )
-
-
-def _aviso(actividad, codigo, mensaje):
-    """Advertencia como fila de tabla, no como texto corrido."""
-    actividad = actividad or {}
-
-    return {
-        "hoja": str(actividad.get("hoja") or ""),
-        "fila": actividad.get("fila_excel") or "",
-        "actividad": str(actividad.get("nombre") or ""),
-        "tipo": ETIQUETAS_AVISO.get(
-            str(codigo or "").strip().upper(),
-            "Diferencia",
-        ),
-        "detalle": _numeros_legibles(mensaje),
-    }
-
-
-def _bytes_legibles(valor):
-    """Formatea el tamano con separador de miles, o '?' si no se conoce."""
-    try:
-        return f"{int(valor):,}".replace(",", ".") + " bytes"
-    except (TypeError, ValueError):
-        return "tamano desconocido"
-
-
-def _motivo_sin_relacion(codigo):
-    """Traduce el codigo de la politica a algo que se entienda."""
-    codigo = str(codigo or "").strip().upper()
-
-    if codigo == "AMBIGUOUS_SAME_NAME":
-        return (
-            "El ZIP tiene varios archivos con ese mismo nombre y tamanos "
-            "distintos, asi que no se puede saber cual es. "
-            "Se dejo el recurso de Drive relacionado con la fila."
-        )
-
-    if codigo == "NO_ZIP_MATCH":
-        return (
-            "El ZIP no contiene ningun archivo con ese nombre ni con ese "
-            "tamano. Revisa si el ZIP corresponde a esta pestana."
-        )
-
-    return (
-        "Se dejo el recurso de Drive relacionado con la fila y el cargue "
-        "seguira el flujo normal del ZIP."
-    )
-
-
-def _entrada_zip_desde_drive(item_drive):
-    """Entrada sintetica para que la fila siga contando como relacionada.
-
-    No apunta a ningun miembro del ZIP: 'miembro' queda vacio y el cargue
-    resuelve ese archivo por el flujo historico.
-    """
-    return {
-        "nombre": str((item_drive or {}).get("nombre") or ""),
-        "tamano": (item_drive or {}).get("tamano"),
-        "miembro": "",
-    }
 
 
 def _registrar_diagnostico_drive(
@@ -1894,10 +1739,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
     procesar_retos=True,
     hoja_objetivo=None,
 ):
-    """Valida Drive SOLO desde la columna G usando nombre unico.
-
-    El tamano se conserva como metadato y solo se usa para desempatar si el
-    ZIP contiene mas de una copia con el mismo nombre.
+    """Valida Drive SOLO desde la columna G y SOLO por nombre + tamano.
 
     Reglas:
     - Drive se consulta unicamente si esa misma fila tiene un enlace Drive real
@@ -1906,9 +1748,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
     - No se usa OVI/OVA/RETO para decidir que archivo tomar de Drive.
     - No se abre ni se descarga ningun H5P/PDF de Drive.
     - Carpeta: se listan solo metadatos de sus hijos y se busca UN archivo que
-      exista en el ZIP con el mismo nombre. Si Drive omitio .h5p pero el MIME
-      es ZIP y la matriz declara H5P, se infiere esa extension sin descargar.
-    - El tamano de Drive NO invalida un nombre unico; solo desempata duplicados.
+      exista en el ZIP con el mismo nombre exacto y el mismo tamano exacto.
     - Archivo directo: solo participa si es .h5p/.pdf y tiene tamano; otros
       enlaces Drive se ignoran y el motor conserva su resolucion historica ZIP.
     - Filas sin enlace Drive en G NO son error.
@@ -1935,7 +1775,6 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         }
 
     indice_zip = _indice_zip_nombre_tamano(ruta_zip)
-    indice_motor = motor_prizma_modulo.crear_indice_recursos(ruta_zip)
     if not indice_zip["total"]:
         return {
             "ok": False,
@@ -1969,18 +1808,10 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         _precargar_referencias_drive_batch(actividades_con_drive)
 
     errores = []
-    advertencias = []
     recursos = []
     mapa_resueltos = {}
     ignorados_archivo_no_recurso = 0
     diagnostico = []
-
-    # Una sola lista de binarios locales. La carpeta enlazada en G decide a
-    # que actividad pertenece el recurso de Drive; nombre y tamano se usan
-    # para localizar/auditar el binario equivalente dentro del ZIP.
-    entradas_zip = []
-    for grupo in indice_zip.get("exacto", {}).values():
-        entradas_zip.extend(grupo)
 
     for actividad in actividades_con_drive:
         descripcion = (
@@ -2029,17 +1860,11 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
             detalles = resultado_drive.get("detalles") or []
 
             candidatos_drive = []
-            extension_esperada = {
-                "H5P": ".h5p",
-                "PDF": ".pdf",
-            }.get(str(actividad.get("tipo_archivo") or "").strip().upper(), "")
-
             for item in detalles:
-                extension = _extension_recurso_drive(item, actividad)
+                nombre_item = str(item.get("nombre") or "").strip()
+                extension = os.path.splitext(nombre_item)[1].lower()
 
                 if extension not in (".h5p", ".pdf"):
-                    continue
-                if extension_esperada and extension != extension_esperada:
                     continue
                 if item.get("tamano") is None:
                     continue
@@ -2049,7 +1874,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
             if not candidatos_drive:
                 errores.append(
                     descripcion
-                    + ": la carpeta de Drive no contiene ningun recurso H5P/PDF reconocible "
+                    + ": la carpeta de Drive no contiene ningun .h5p ni .pdf "
                     + "(elementos con tamano leidos: " + str(len(detalles))
                     + ", subcarpetas recorridas: "
                     + str(resultado_drive.get("subcarpetas", 0)) + ")."
@@ -2059,103 +1884,70 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
                     descripcion,
                     url_drive,
                     target_id,
-                    "carpeta sin recurso H5P/PDF",
+                    "carpeta sin h5p/pdf",
                     resultado_drive,
                 )
                 continue
 
-            # La carpeta de la columna G pertenece a ESTA fila. Si contiene un
-            # unico recurso compatible, ese archivo queda relacionado con la
-            # actividad antes de comparar nada contra otras filas. Si hay
-            # copias identicas dentro de la misma carpeta se continua y se
-            # muestra advertencia al final; recursos diferentes si son una
-            # ambiguedad real.
-            eleccion_drive = choose_drive_item(
-                candidatos_drive,
-                expected_extension=extension_esperada,
-            )
-            if eleccion_drive.error:
+            coincidencias = []
+            fallas = []
+
+            for item in candidatos_drive:
+                estado, entradas = _buscar_en_zip(
+                    indice_zip,
+                    str(item.get("nombre") or ""),
+                    item.get("tamano"),
+                )
+
+                if estado == "ok":
+                    coincidencias.append((item, entradas[0]))
+                else:
+                    fallas.append((item, estado, entradas))
+
+            if len(coincidencias) > 1:
+                coincidencias = _desempatar_por_tipo_declarado(
+                    actividad,
+                    coincidencias,
+                )
+
+            if len(coincidencias) == 0:
+                errores.append(
+                    descripcion + ": " + _explicar_fallas_drive_zip(fallas)
+                )
+                _registrar_diagnostico_drive(
+                    diagnostico,
+                    descripcion,
+                    url_drive,
+                    target_id,
+                    "sin coincidencia nombre+tamano",
+                    resultado_drive,
+                    fallas,
+                )
+                continue
+
+            if len(coincidencias) > 1:
                 nombres = ", ".join(
                     str(item.get("nombre") or "")
-                    + " (" + str(item.get("tamano")) + " bytes)"
-                    for item in candidatos_drive[:8]
+                    for item, _ in coincidencias[:6]
                 )
                 errores.append(
                     descripcion
-                    + ": la carpeta enlazada en G contiene varios recursos diferentes "
-                    + "y no se puede decidir cual corresponde a la actividad: "
-                    + nombres + "."
+                    + ": la carpeta tiene mas de un recurso que coincide con el ZIP "
+                    + "por nombre y tamano (" + nombres + "). "
+                    + "No se elige ninguno para no adivinar."
                 )
                 _registrar_diagnostico_drive(
                     diagnostico,
                     descripcion,
                     url_drive,
                     target_id,
-                    "ambiguo: varios recursos diferentes en la carpeta de la actividad",
+                    "ambiguo: varios coinciden",
                     resultado_drive,
+                    fallas,
                 )
                 continue
 
-            elegido = eleccion_drive.item
-            for aviso in eleccion_drive.warnings:
-                advertencias.append(
-                    _aviso(actividad, aviso.code, aviso.message)
-                )
-
-            # Primero intentamos nombre + tamano. Si Drive recorto/cambio el
-            # nombre, un tamano unico del mismo tipo puede resolverlo. Como
-            # ultimo respaldo reutilizamos el resolver historico SOLO para
-            # esta misma actividad de la hoja objetivo. Ninguna advertencia
-            # detiene el analisis.
-            resultado_match = match_drive_resource_to_zip(
-                elegido,
-                entradas_zip,
-                expected_extension=extension_esperada,
-            )
-
-            if resultado_match.error:
-                zip_fallback = _resolver_zip_por_actividad_fallback(
-                    actividad,
-                    indice_zip,
-                    indice_motor,
-                    actividades,
-                )
-                if zip_fallback is not None:
-                    resultado_match = match_drive_resource_to_zip(
-                        elegido,
-                        entradas_zip,
-                        expected_extension=extension_esperada,
-                        fallback_entry=zip_fallback,
-                    )
-
-            if resultado_match.error or not resultado_match.entry:
-                # La carpeta de G ya identifico el recurso de esta fila.
-                # Que el ZIP no tenga un equivalente NO detiene el analisis:
-                # se registra la relacion con lo que hay en Drive y la
-                # diferencia se informa al final como advertencia.
-                advertencias.append(_aviso(
-                    actividad,
-                    "SIN_EQUIVALENTE_ZIP",
-                    "En Drive esta \"" + str(elegido.get("nombre") or "")
-                    + "\" (" + _bytes_legibles(elegido.get("tamano"))
-                    + "). " + _motivo_sin_relacion(resultado_match.error),
-                ))
-                _registrar_diagnostico_drive(
-                    diagnostico,
-                    descripcion,
-                    url_drive,
-                    target_id,
-                    "advertencia: ZIP sin equivalente para la actividad",
-                    resultado_drive,
-                    [(elegido, str(resultado_match.error or "sin_relacion"), [])],
-                )
-                zip_elegido = _entrada_zip_desde_drive(elegido)
-            else:
-                zip_elegido = resultado_match.entry
-            for aviso in resultado_match.warnings:
-                advertencias.append(
-                    _aviso(actividad, aviso.code, aviso.message)
-                )
+            elegido, zip_elegido = coincidencias[0]
 
         elif tipo_ref == "file":
             elegido = referencia.get("item")
@@ -2180,67 +1972,37 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
 
             nombre_drive = str(elegido.get("nombre") or "").strip()
             tamano_drive = elegido.get("tamano")
-            extension = _extension_recurso_drive(elegido, actividad)
-            extension_esperada = {
-                "H5P": ".h5p",
-                "PDF": ".pdf",
-            }.get(str(actividad.get("tipo_archivo") or "").strip().upper(), "")
+            extension = os.path.splitext(nombre_drive)[1].lower()
 
             # Un Drive directo que no sea un recurso cargable no interviene.
             # Esto evita falsos conflictos con Docs, Sheets, enlaces auxiliares, etc.
-            if (
-                extension not in (".h5p", ".pdf")
-                or (extension_esperada and extension != extension_esperada)
-                or tamano_drive is None
-            ):
+            if extension not in (".h5p", ".pdf") or tamano_drive is None:
                 ignorados_archivo_no_recurso += 1
                 continue
 
-            resultado_match = match_drive_resource_to_zip(
-                elegido,
-                entradas_zip,
-                expected_extension=extension,
+            estado, entradas = _buscar_en_zip(
+                indice_zip,
+                nombre_drive,
+                tamano_drive,
             )
 
-            if resultado_match.error:
-                zip_fallback = _resolver_zip_por_actividad_fallback(
-                    actividad,
-                    indice_zip,
-                    indice_motor,
-                    actividades,
+            if estado != "ok":
+                errores.append(
+                    descripcion + ": "
+                    + _explicar_fallas_drive_zip([(elegido, estado, entradas)])
                 )
-                if zip_fallback is not None:
-                    resultado_match = match_drive_resource_to_zip(
-                        elegido,
-                        entradas_zip,
-                        expected_extension=extension,
-                        fallback_entry=zip_fallback,
-                    )
-
-            if resultado_match.error or not resultado_match.entry:
-                advertencias.append(_aviso(
-                    actividad,
-                    "SIN_EQUIVALENTE_ZIP",
-                    "En Drive esta \"" + str(elegido.get("nombre") or "")
-                    + "\" (" + _bytes_legibles(elegido.get("tamano"))
-                    + "). " + _motivo_sin_relacion(resultado_match.error),
-                ))
                 _registrar_diagnostico_drive(
                     diagnostico,
                     descripcion,
                     url_drive,
                     target_id,
-                    "advertencia: archivo directo sin equivalente en el ZIP",
+                    "archivo directo sin coincidencia",
                     {"detalles": [elegido]},
-                    [(elegido, str(resultado_match.error or "sin_relacion"), [])],
+                    [(elegido, estado, entradas)],
                 )
                 continue
 
-            zip_elegido = resultado_match.entry
-            for aviso in resultado_match.warnings:
-                advertencias.append(
-                    _aviso(actividad, aviso.code, aviso.message)
-                )
+            zip_elegido = entradas[0]
 
         else:
             # Si Google devuelve un link que no es recurso utilizable, no hacemos
@@ -2253,20 +2015,11 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         if not nombre_drive or not zip_elegido:
             continue
 
-        # A partir de aqui la ruta de carga usa el nombre REAL del miembro ZIP.
-        # Drive es la referencia que decide cual recurso corresponde a la fila;
-        # el ZIP es la fuente binaria que finalmente se sube a PRIZMA.
-        nombre_zip = str(zip_elegido.get("nombre") or "").strip()
-        tamano_zip = int(zip_elegido.get("tamano") or 0)
-        actividad["nombre_recurso_drive"] = nombre_zip
+        actividad["nombre_recurso_drive"] = nombre_drive
 
         resuelto = {
-            "nombre": nombre_zip,
-            "nombre_drive": nombre_drive,
-            "tamano": tamano_zip,
-            "tamano_zip": tamano_zip,
-            "tamano_drive": tamano_drive,
-            "miembro_zip": str(zip_elegido.get("miembro") or ""),
+            "nombre": nombre_drive,
+            "tamano": tamano_drive,
             "tipo_ref": tipo_ref,
             "drive_id": target_id,
         }
@@ -2276,83 +2029,9 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
             "hoja": actividad.get("hoja", ""),
             "fila": actividad.get("fila_excel", 0),
             "actividad": actividad.get("nombre", ""),
-            "archivo": nombre_zip,
-            "archivo_drive": nombre_drive,
-            "tamano": tamano_zip,
-            "tamano_drive": tamano_drive,
+            "archivo": nombre_drive,
+            "tamano": tamano_drive,
         })
-
-    # Los duplicados entre actividades no impiden continuar: la carpeta G
-    # mantiene la relacion fila -> recurso. Se informa al usuario cuando ya
-    # termino el analisis completo.
-    for aviso in detect_duplicate_assignments(recursos):
-        advertencias.append(_aviso(None, aviso.code, aviso.message))
-
-    # Evitar repetir la misma advertencia si varias reglas vieron lo mismo.
-    vistas = set()
-    unicas = []
-    for item in advertencias:
-        clave = (
-            str(item.get("hoja") or ""),
-            str(item.get("fila") or ""),
-            str(item.get("tipo") or ""),
-            str(item.get("detalle") or ""),
-        )
-        if clave in vistas:
-            continue
-        vistas.add(clave)
-        unicas.append(item)
-
-    def _orden_aviso(item):
-        try:
-            fila = int(item.get("fila") or 0)
-        except (TypeError, ValueError):
-            fila = 0
-        return (
-            PRIORIDAD_AVISO.get(str(item.get("tipo") or ""), 9),
-            str(item.get("hoja") or ""),
-            fila,
-        )
-
-    advertencias = sorted(unicas, key=_orden_aviso)
-
-    if advertencias:
-        conteo = {}
-        for item in advertencias:
-            tipo = str(item.get("tipo") or "")
-            conteo[tipo] = conteo.get(tipo, 0) + 1
-
-        print("")
-        print("=" * 100)
-        print("ADVERTENCIAS DEL ANALISIS: " + str(len(advertencias))
-              + "  (no detienen el cargue)")
-        print("   " + " | ".join(
-            tipo + ": " + str(cantidad)
-            for tipo, cantidad in sorted(conteo.items())
-        ))
-        print("=" * 100)
-        print(
-            "FILA".ljust(6)
-            + "ACTIVIDAD".ljust(34)
-            + "TIPO".ljust(28)
-            + "DETALLE"
-        )
-        print("-" * 100)
-
-        for item in advertencias:
-            actividad_txt = str(item.get("actividad") or "-")
-            if len(actividad_txt) > 32:
-                actividad_txt = actividad_txt[:31] + "…"
-
-            print(
-                str(item.get("fila") or "-").ljust(6)
-                + actividad_txt.ljust(34)
-                + str(item.get("tipo") or "").ljust(28)
-                + str(item.get("detalle") or "")
-            )
-
-        print("=" * 100)
-        print("")
 
     if diagnostico:
         print("")
@@ -2392,9 +2071,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         len(actividades_con_drive),
         "fila(s) con Drive en G |",
         len(recursos),
-        "recurso(s) relacionados por su fila/carpeta G |",
-        len(advertencias),
-        "advertencia(s) para mostrar al final |",
+        "recurso(s) confirmados por nombre+tamano |",
         ignorados_archivo_no_recurso,
         "archivo(s) Drive no-H5P/PDF ignorado(s) |",
         len(actividades) - len(actividades_con_drive),
@@ -2408,7 +2085,6 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         "validadas_drive": len(recursos),
         "ignoradas_drive_no_recurso": ignorados_archivo_no_recurso,
         "errores": errores,
-        "advertencias": advertencias,
         "recursos": recursos,
         "_mapa_resueltos": mapa_resueltos,
     }
@@ -2466,61 +2142,6 @@ motor_prizma_modulo.leer_actividades_excel = _leer_actividades_excel_hoja_objeti
 _RESOLVER_RECURSO_ORIGINAL = motor_prizma_modulo.resolver_recurso
 
 
-def _resolver_zip_por_actividad_fallback(
-    actividad,
-    indice_zip,
-    indice_motor,
-    actividades_curso,
-):
-    """Resuelve el binario local del ZIP para una fila ya vinculada por G.
-
-    Se usa SOLO cuando el enlace de la columna G ya identifica un unico
-    recurso compatible en Drive pero su nombre externo no coincide con el
-    nombre dentro del ZIP. No consulta otras hojas ni otros enlaces Drive.
-
-    La seleccion local reutiliza el resolver historico, que exige una
-    coincidencia unica para la actividad y su tipo. Si no puede resolver de
-    forma segura, devuelve None y el preflight conserva el error.
-    """
-    actividad_local = dict(actividad or {})
-    actividad_local.pop("nombre_recurso_drive", None)
-
-    carpeta_prueba = os.path.join(
-        TEMP_DIR,
-        "preflight_fallback_" + uuid.uuid4().hex,
-    )
-
-    try:
-        resultado, error = _RESOLVER_RECURSO_ORIGINAL(
-            actividad_local,
-            indice_motor,
-            carpeta_prueba,
-            actividades_curso,
-        )
-        if error or not resultado:
-            return None
-
-        nombre = str(resultado.get("nombre_original") or "").strip()
-        if not nombre:
-            return None
-
-        candidatos = list(
-            indice_zip.get("exacto", {}).get(
-                _clave_nombre_drive_zip(nombre),
-                [],
-            )
-        )
-
-        # El resolver historico ya rechaza duplicados; mantenemos la misma
-        # garantia tambien al convertir su resultado al indice del preflight.
-        if len(candidatos) != 1:
-            return None
-
-        return candidatos[0]
-    finally:
-        shutil.rmtree(carpeta_prueba, ignore_errors=True)
-
-
 def _resolver_recurso_desde_preflight(
     actividad,
     indice_recursos,
@@ -2538,23 +2159,12 @@ def _resolver_recurso_desde_preflight(
 
     nombre_esperado = str(resuelto.get("nombre") or "").strip()
     nombre_esperado_clave = _clave_nombre_drive_zip(nombre_esperado)
-    miembro_esperado = str(resuelto.get("miembro_zip") or "").strip()
 
-    # El preflight ya resolvio exactamente que miembro del ZIP corresponde a
-    # esta fila. Esto permite continuar incluso si existen copias con el mismo
-    # nombre y tamano: no volvemos a adivinar durante el cargue real.
-    if miembro_esperado:
-        exactos = [
-            recurso
-            for recurso in indice_recursos
-            if recurso.get("miembro") == miembro_esperado
-        ]
-    else:
-        exactos = [
-            recurso
-            for recurso in indice_recursos
-            if _clave_nombre_drive_zip(recurso.get("nombre")) == nombre_esperado_clave
-        ]
+    exactos = [
+        recurso
+        for recurso in indice_recursos
+        if _clave_nombre_drive_zip(recurso.get("nombre")) == nombre_esperado_clave
+    ]
 
     if len(exactos) == 0:
         return None, "ERROR_RECURSO_DRIVE_NO_ESTA_EN_ZIP"
@@ -2572,13 +2182,9 @@ def _resolver_recurso_desde_preflight(
     try:
         with zipfile.ZipFile(elegido["zip"], "r") as zip_ref:
             info = zip_ref.getinfo(elegido["miembro"])
-            tamano_esperado = int(
-                resuelto.get("tamano_zip")
-                if resuelto.get("tamano_zip") is not None
-                else resuelto.get("tamano") or -1
-            )
+            tamano_esperado = int(resuelto.get("tamano") or -1)
             if tamano_esperado >= 0 and int(info.file_size) != tamano_esperado:
-                return None, "ERROR_RECURSO_ZIP_TAMANO_CAMBIO"
+                return None, "ERROR_RECURSO_DRIVE_TAMANO_CAMBIO"
 
             with zip_ref.open(elegido["miembro"]) as origen:
                 with open(ruta_destino, "wb") as destino:
@@ -2595,22 +2201,14 @@ def _resolver_recurso_desde_preflight(
         "Recurso exacto prevalidado Drive -> ZIP:",
         elegido["nombre"],
         "|",
-        int(resuelto.get("tamano_zip") or resuelto.get("tamano") or 0),
-        "bytes ZIP",
+        int(resuelto.get("tamano") or 0),
+        "bytes",
     )
     return {
         "ruta": ruta_destino,
         "nombre_original": elegido["nombre"],
         "puntuacion": 10000,
     }, None
-
-
-# Durante el cargue real, reutilizar exactamente lo resuelto por el preflight.
-# ejecutar_cargue es una funcion del modulo motor_prizma y consulta estos
-# nombres globales en tiempo de ejecucion, por eso el reemplazo aplica tambien
-# al alias importado al inicio de este archivo.
-motor_prizma_modulo.validar_carpeta_drive_para_actividad = _validar_drive_desde_preflight
-motor_prizma_modulo.resolver_recurso = _resolver_recurso_desde_preflight
 
 # ============================================================
 # TRABAJOS
@@ -3636,7 +3234,6 @@ def generar_html(
 
         drive_info = resultado.get("drive") or {}
         drive_validados = int(drive_info.get("validadas_drive") or 0)
-        advertencias_drive = list(drive_info.get("advertencias") or [])
         recursos_drive = {
             (str(item.get("hoja") or ""), int(item.get("fila") or 0)):
                 str(item.get("archivo") or "")
@@ -3691,89 +3288,6 @@ def generar_html(
                 </tr>
                 """
 
-        bloque_advertencias_revision = ""
-        if advertencias_drive:
-
-            colores_aviso = {
-                "Sin equivalente en el ZIP": ("#fef3f2", "#b42318"),
-                "Tamano distinto": ("#fff4ed", "#b93815"),
-                "Recurso en varias filas": ("#fffaeb", "#b54708"),
-                "Copia repetida en el ZIP": ("#fffaeb", "#b54708"),
-                "Copia repetida en Drive": ("#fffaeb", "#b54708"),
-                "Nombre distinto": ("#eff8ff", "#175cd3"),
-            }
-
-            conteo_aviso = {}
-            filas_aviso = ""
-
-            for item in advertencias_drive:
-                if not isinstance(item, dict):
-                    item = {"tipo": "Diferencia", "detalle": str(item)}
-
-                tipo = str(item.get("tipo") or "Diferencia")
-                conteo_aviso[tipo] = conteo_aviso.get(tipo, 0) + 1
-
-                fondo, letra = colores_aviso.get(tipo, ("#f2f4f7", "#475467"))
-
-                actividad_txt = str(item.get("actividad") or "")
-                fila_txt = str(item.get("fila") or "")
-
-                filas_aviso += (
-                    "<tr>"
-                    + '<td style="white-space:nowrap;font-weight:700;'
-                      'color:#475467;">' + (e(fila_txt) or "—") + "</td>"
-                    + '<td style="color:#101828;">'
-                      + (e(actividad_txt) or "<i>Todas las filas</i>") + "</td>"
-                    + '<td style="white-space:nowrap;">'
-                      + '<span style="display:inline-block;padding:3px 9px;'
-                      'border-radius:999px;font-size:11px;font-weight:800;'
-                      'background:' + fondo + ';color:' + letra + ';">'
-                      + e(tipo) + "</span></td>"
-                    + '<td style="color:#475467;">'
-                      + e(item.get("detalle")) + "</td>"
-                    + "</tr>"
-                )
-
-            resumen_tipos = " · ".join(
-                e(tipo) + ": <b>" + str(cantidad) + "</b>"
-                for tipo, cantidad in sorted(conteo_aviso.items())
-            )
-
-            bloque_advertencias_revision = (
-                '<div style="grid-column:1/-1;margin-bottom:18px;'
-                'background:#fff;border:1px solid #fedf89;border-radius:16px;'
-                'overflow:hidden;">'
-
-                + '<div style="background:#fffaeb;padding:15px 18px;'
-                  'border-bottom:1px solid #fedf89;">'
-                + '<strong style="font-size:14px;color:#b54708;">'
-                + str(len(advertencias_drive))
-                + " advertencia(s) en la comparación con Google Drive</strong>"
-                + '<p style="margin:5px 0 8px;font-size:12.5px;color:#667085;">'
-                + "El análisis terminó completo. Nada de esto bloqueó una "
-                + "actividad, pero conviene revisarlo antes de cargar.</p>"
-                + '<div style="font-size:12px;color:#667085;">'
-                + resumen_tipos + "</div>"
-                + "</div>"
-
-                + '<div style="max-height:340px;overflow:auto;">'
-                + '<table style="width:100%;border-collapse:collapse;'
-                  'font-size:12.5px;">'
-                + '<thead><tr style="background:#f9fafb;'
-                  'position:sticky;top:0;">'
-                + '<th style="text-align:left;padding:9px 14px;font-size:11px;'
-                  'color:#667085;border-bottom:1px solid #e4e7ec;">FILA</th>'
-                + '<th style="text-align:left;padding:9px 14px;font-size:11px;'
-                  'color:#667085;border-bottom:1px solid #e4e7ec;">ACTIVIDAD</th>'
-                + '<th style="text-align:left;padding:9px 14px;font-size:11px;'
-                  'color:#667085;border-bottom:1px solid #e4e7ec;">TIPO</th>'
-                + '<th style="text-align:left;padding:9px 14px;font-size:11px;'
-                  'color:#667085;border-bottom:1px solid #e4e7ec;">DETALLE</th>'
-                + "</tr></thead>"
-                + '<tbody style="line-height:1.5;">' + filas_aviso + "</tbody>"
-                + "</table></div></div>"
-            )
-
         bloque_error_revision = ""
         if error:
             bloque_error_revision = f"""
@@ -3801,7 +3315,6 @@ def generar_html(
             <div class="resumen-card rojo"><span>PDF</span><strong>{total_pdf}</strong></div>
         </section>
 
-        {bloque_advertencias_revision}
         {bloque_error_revision}
 
         <section class="revision-grid">
@@ -4109,19 +3622,6 @@ def generar_html(
             .ayuda-separador { height: 1px; background: var(--borde); margin: 24px 0; }
             .titulo-consejos { color: #4f46e5; }
             .consejo { color: #475467; font-size: 13px; line-height: 1.55; }
-
-            .alerta-advertencia {
-                display:flex; gap:12px; align-items:flex-start; padding:16px 18px;
-                border:1px solid #f5c451; background:#fff8df; color:#7a4b00;
-                border-radius:16px; box-shadow:var(--sombra);
-            }
-            .alerta-advertencia p { margin:4px 0 8px; color:#805b16; }
-            .alerta-advertencia ul { margin:8px 0 0; padding-left:20px; }
-            .alerta-advertencia li { margin:6px 0; line-height:1.4; }
-            .alerta-advertencia-icono {
-                width:28px; height:28px; border-radius:50%; background:#f4b223;
-                color:#4b3200; display:grid; place-items:center; font-weight:900; flex:0 0 auto;
-            }
 
             .alerta-error {
                 grid-column: 1 / -1; display: flex; gap: 12px; padding: 16px 18px; border-radius: 12px;
@@ -4723,61 +4223,13 @@ def cambiar_clave_enviar(
 # ============================================================
 
 @app.get("/google/conectar")
-def google_conectar():
-    try:
-        client_config, redirect_uri = _google_client_config()
-        usuario = _usuario_actual()
-
-        if not usuario:
-            raise RuntimeError(
-                "No hay una sesion activa para conectar Google."
-            )
-
-        flow = Flow.from_client_config(
-            client_config,
-            scopes=GOOGLE_SCOPES,
-            autogenerate_code_verifier=True,
-        )
-        flow.redirect_uri = redirect_uri
-
-        authorization_url, estado_generado = flow.authorization_url(
-            access_type="offline",
-            include_granted_scopes="true",
-            prompt="consent",
-        )
-
-        _guardar_estado_oauth(
-            estado_generado,
-            usuario,
-            flow.code_verifier,
-        )
-
-        return RedirectResponse(
-            authorization_url,
-            status_code=302,
-        )
-
-    except Exception as error:
-        return HTMLResponse(
-            generar_html(
-                error=(
-                    "No fue posible iniciar la autorizacion de Google. "
-                    + str(error)
-                )
-            ),
-            status_code=500,
-        )
-
-
-@app.get("/google/callback")
-def google_callback(request: FastAPIRequest):
+def google_conectar(request: FastAPIRequest):
     try:
         client_config, redirect_uri = _google_client_config()
 
+        codigo = str(request.query_params.get("code") or "").strip()
         estado = str(request.query_params.get("state") or "").strip()
-        error_google = str(
-            request.query_params.get("error") or ""
-        ).strip()
+        error_google = str(request.query_params.get("error") or "").strip()
 
         if error_google:
             if estado:
@@ -4789,6 +4241,7 @@ def google_callback(request: FastAPIRequest):
             descripcion = str(
                 request.query_params.get("error_description") or ""
             ).strip()
+
             detalle = descripcion or error_google
 
             return HTMLResponse(
@@ -4801,17 +4254,36 @@ def google_callback(request: FastAPIRequest):
                 status_code=400,
             )
 
-        codigo = str(request.query_params.get("code") or "").strip()
-
         if not codigo:
-            return HTMLResponse(
-                generar_html(
-                    error=(
-                        "Google no devolvio el codigo de autorizacion. "
-                        "Vuelve a pulsar Conectar con Google."
-                    )
-                ),
-                status_code=400,
+            usuario = _usuario_actual()
+
+            if not usuario:
+                raise RuntimeError(
+                    "No hay una sesion activa para conectar Google."
+                )
+
+            flow = Flow.from_client_config(
+                client_config,
+                scopes=GOOGLE_SCOPES,
+                autogenerate_code_verifier=True,
+            )
+            flow.redirect_uri = redirect_uri
+
+            authorization_url, estado_generado = flow.authorization_url(
+                access_type="offline",
+                include_granted_scopes="true",
+                prompt="consent",
+            )
+
+            _guardar_estado_oauth(
+                estado_generado,
+                usuario,
+                flow.code_verifier,
+            )
+
+            return RedirectResponse(
+                authorization_url,
+                status_code=302,
             )
 
         datos_estado = _consumir_estado_oauth(estado)
