@@ -1974,10 +1974,6 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         }
 
     indice_zip = _indice_zip_nombre_tamano(ruta_zip)
-    # Índice del motor histórico. Se usa únicamente como fallback por la
-    # MISMA actividad cuando nombre/tamaño directos no bastan para resolver
-    # el miembro del ZIP. No consulta otras hojas ni otros enlaces Drive.
-    indice_motor = motor_prizma_modulo.crear_indice_recursos(ruta_zip)
 
     _t0 = time.perf_counter()
 
@@ -2253,26 +2249,6 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
             entradas_zip,
             expected_extension=extension_esperada,
         )
-
-        # Si el nombre/tamaño directo no logra confirmar el recurso, usamos
-        # el resolver histórico SOLO para esta misma actividad. Esto cubre
-        # nombres renombrados/truncados por la automatización del ZIP sin
-        # mezclar archivos de otras filas. El tamaño sigue siendo la prueba
-        # final para habilitar el cargue automático.
-        if not getattr(resultado_match, "verified_same_file", False):
-            fallback_zip = _resolver_zip_por_actividad_fallback(
-                actividad,
-                indice_zip,
-                indice_motor,
-                actividades,
-            )
-            if fallback_zip is not None:
-                resultado_match = match_drive_resource_to_zip(
-                    elegido,
-                    entradas_zip,
-                    expected_extension=extension_esperada,
-                    fallback_entry=fallback_zip,
-                )
 
         for aviso in resultado_match.warnings:
             advertencias.append(_aviso(actividad, aviso.code, aviso.message))

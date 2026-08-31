@@ -1732,34 +1732,67 @@ def guardar_resultado(
 def desbloquear_interfaz_post_guardado(
     pagina,
 ):
-    """Cierra el overlay solo si realmente existe y esta visible.
 
-    Antes esta funcion agregaba 1.1 s de espera y un clic ciego incluso
-    cuando no habia overlay. En el camino normal ahora retorna de inmediato.
-    """
+    pagina.wait_for_timeout(
+        700
+    )
+
     overlay = pagina.locator(
         "div.MuiBox-root.css-15m6u24"
     )
 
     try:
-        for i in range(overlay.count()):
+
+        for i in range(
+            overlay.count()
+        ):
+
             elemento = overlay.nth(i)
+
             if not elemento.is_visible():
                 continue
 
-            print("✅ Overlay detectado.")
+            print(
+                "✅ Overlay detectado."
+            )
 
             try:
+
                 elemento.click(
-                    position={"x": 5, "y": 5},
+                    position={
+                        "x": 5,
+                        "y": 5,
+                    },
                     force=True,
                 )
-            except Exception:
-                pagina.mouse.click(720, 450)
 
-            # Pequena pausa solo despues de haber cerrado un overlay real.
-            pagina.wait_for_timeout(120)
+            except Exception:
+
+                pagina.mouse.click(
+                    720,
+                    450,
+                )
+
+            pagina.wait_for_timeout(
+                700
+            )
+
             return True
+
+    except Exception:
+        pass
+
+    try:
+
+        pagina.mouse.click(
+            720,
+            450,
+        )
+
+        pagina.wait_for_timeout(
+            400
+        )
+
     except Exception:
         pass
 
@@ -1883,7 +1916,6 @@ def asegurar_listado(
 def entrar_categoria(
     pagina,
     categoria,
-    estado_navegacion=None,
 ):
 
     nombres_pestana = {
@@ -1898,12 +1930,6 @@ def entrar_categoria(
 
     if not texto_pestana:
         return False
-
-    if (
-        isinstance(estado_navegacion, dict)
-        and estado_navegacion.get("categoria_actual") == categoria
-    ):
-        return True
 
     try:
 
@@ -1928,9 +1954,6 @@ def entrar_categoria(
         pagina.wait_for_timeout(
             1200
         )
-
-        if isinstance(estado_navegacion, dict):
-            estado_navegacion["categoria_actual"] = categoria
 
         return True
 
@@ -2568,76 +2591,6 @@ def obtener_terminos_busqueda_reto(
 
 
 # ============================================================
-# ESPERAS ADAPTATIVAS DE RENDIMIENTO
-# ============================================================
-
-def _esperar_resultados_busqueda(
-    pagina,
-    actividad,
-    timeout_ms=2600,
-    intervalo_ms=100,
-):
-    """Espera solo hasta que aparezcan resultados y la firma quede estable.
-
-    Si no aparece ningun resultado conserva el timeout historico completo,
-    evitando falsos negativos por una respuesta lenta de PRIZMA.
-    """
-    transcurrido = 0
-    firma_anterior = None
-    estables = 0
-
-    while True:
-        firma = obtener_firma_pagina(pagina, actividad)
-
-        if firma:
-            if firma == firma_anterior:
-                estables += 1
-            else:
-                estables = 0
-
-            if estables >= 1:
-                return firma
-
-        firma_anterior = firma
-
-        if transcurrido >= timeout_ms:
-            return firma or ""
-
-        espera = min(intervalo_ms, timeout_ms - transcurrido)
-        if espera <= 0:
-            return firma or ""
-
-        pagina.wait_for_timeout(espera)
-        transcurrido += espera
-
-
-def _esperar_cambio_firma(
-    pagina,
-    actividad,
-    firma_anterior,
-    timeout_ms=1200,
-    intervalo_ms=100,
-):
-    """Espera un cambio real de pagina sin pagar 1.2 s fijos."""
-    transcurrido = 0
-
-    while True:
-        firma = obtener_firma_pagina(pagina, actividad)
-        if firma != firma_anterior:
-            return True
-
-        if transcurrido >= timeout_ms:
-            return False
-
-        espera = min(intervalo_ms, timeout_ms - transcurrido)
-        if espera <= 0:
-            return False
-
-        pagina.wait_for_timeout(espera)
-        transcurrido += espera
-
-
-# ============================================================
 # BUSCAR ACTIVIDAD
 # ============================================================
 
@@ -2730,14 +2683,16 @@ def buscar_actividad_correcta(
             else 2600
         )
 
-        _esperar_resultados_busqueda(
-            pagina,
-            actividad,
-            timeout_ms=espera_busqueda,
+        pagina.wait_for_timeout(
+            espera_busqueda
         )
 
         asegurar_pagina_1(
             pagina
+        )
+
+        pagina.wait_for_timeout(
+            700
         )
 
         coincidencias_intento = []
@@ -2842,11 +2797,8 @@ def buscar_actividad_correcta(
                     timeout=5000
                 )
 
-                _esperar_cambio_firma(
-                    pagina,
-                    actividad,
-                    firma_actual,
-                    timeout_ms=1200,
+                pagina.wait_for_timeout(
+                    1200
                 )
 
             except Exception:
@@ -2917,13 +2869,16 @@ def buscar_actividad_correcta(
         if actividad["categoria_prizma"] == "CHALLENGE"
         else 1800
     )
-    _esperar_resultados_busqueda(
-        pagina,
-        actividad,
-        timeout_ms=espera_recuperacion,
-    )
+    pagina.wait_for_timeout(espera_recuperacion)
 
     asegurar_pagina_1(pagina)
+
+    espera_estabilizacion = (
+        1000
+        if actividad["categoria_prizma"] == "CHALLENGE"
+        else 700
+    )
+    pagina.wait_for_timeout(espera_estabilizacion)
 
     firmas_recuperacion = set()
     numero_recuperacion = 1
@@ -2997,11 +2952,8 @@ def buscar_actividad_correcta(
                 siguiente.click(
                     timeout=5000
                 )
-                _esperar_cambio_firma(
-                    pagina,
-                    actividad,
-                    firma_actual,
-                    timeout_ms=1200,
+                pagina.wait_for_timeout(
+                    1200
                 )
                 avanzo = True
             except Exception:
@@ -3738,30 +3690,6 @@ def archivo_visible(
     return False
 
 
-def _esperar_archivo_visible(
-    pagina,
-    nombre_archivo,
-    timeout_ms=2200,
-    intervalo_ms=100,
-):
-    """Termina en cuanto PRIZMA muestre el nombre del archivo cargado."""
-    transcurrido = 0
-
-    while True:
-        if archivo_visible(pagina, nombre_archivo):
-            return True
-
-        if transcurrido >= timeout_ms:
-            return False
-
-        espera = min(intervalo_ms, timeout_ms - transcurrido)
-        if espera <= 0:
-            return False
-
-        pagina.wait_for_timeout(espera)
-        transcurrido += espera
-
-
 # ============================================================
 # PATCH
 # ============================================================
@@ -4133,7 +4061,6 @@ def procesar_actividad(
     respuestas,
     captura,
     actividades_curso,
-    estado_navegacion=None,
 ):
 
     print()
@@ -4219,7 +4146,6 @@ def procesar_actividad(
     if not entrar_categoria(
         pagina,
         actividad["categoria_prizma"],
-        estado_navegacion,
     ):
 
         return {
@@ -4426,12 +4352,15 @@ def procesar_actividad(
                 nombre_recurso,
         }
 
-    # 9. VISIBLE - espera adaptativa; si PRIZMA responde rapido no pagamos
-    # los 2.2 segundos fijos de la version anterior.
-    if not _esperar_archivo_visible(
+    pagina.wait_for_timeout(
+        2200
+    )
+
+    # 9. VISIBLE
+
+    if not archivo_visible(
         pagina,
         nombre_recurso,
-        timeout_ms=2200,
     ):
 
         cancelar_edicion_segura(
@@ -4689,7 +4618,6 @@ def ejecutar_cargue(
         with sync_playwright() as p:
             respuestas = []
             captura = {"activa": False}
-            estado_navegacion = {"categoria_actual": None}
 
             def registrar_respuesta(response):
                 if not captura["activa"]:
@@ -4708,7 +4636,6 @@ def ejecutar_cargue(
 
             def abrir_sesion_limpia(motivo=""):
                 nonlocal navegador
-                estado_navegacion["categoria_actual"] = None
                 if motivo:
                     print("⚠️ Reiniciando sesión PRIZMA:", motivo)
                 try:
@@ -4828,7 +4755,6 @@ def ejecutar_cargue(
                                 respuestas,
                                 captura,
                                 actividades_a_procesar,
-                                estado_navegacion,
                             )
                         except Exception as e:
                             print(traceback.format_exc())
@@ -4915,6 +4841,13 @@ def ejecutar_cargue(
                         terminado=True,
                     )
                     return
+
+                try:
+                    pagina.wait_for_timeout(700)
+                except Exception:
+                    errores_estructurales_consecutivos = max(
+                        1, errores_estructurales_consecutivos
+                    )
 
             try:
                 if navegador is not None:
