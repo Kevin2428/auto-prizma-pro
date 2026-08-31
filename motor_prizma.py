@@ -2576,11 +2576,17 @@ def _esperar_resultados_busqueda(
     actividad,
     timeout_ms=2600,
     intervalo_ms=100,
+    firma_previa=None,
 ):
-    """Espera solo hasta que aparezcan resultados y la firma quede estable.
+    """Espera hasta que aparezcan resultados y la firma quede estable.
 
-    Si no aparece ningun resultado conserva el timeout historico completo,
-    evitando falsos negativos por una respuesta lenta de PRIZMA.
+    firma_previa es la pantalla que habia ANTES de aplicar el filtro.
+    Mientras la firma siga siendo esa, el filtro todavia no se aplico y
+    seguir adelante significaria leer datos viejos. Ese era el origen de
+    ERROR_RECUPERANDO_FILA cuando PRIZMA respondia lento.
+
+    Si no aparece ningun resultado conserva el timeout completo, evitando
+    falsos negativos por una respuesta lenta de PRIZMA.
     """
     transcurrido = 0
     firma_anterior = None
@@ -2589,13 +2595,14 @@ def _esperar_resultados_busqueda(
     while True:
         firma = obtener_firma_pagina(pagina, actividad)
 
-        if firma:
+        if firma and firma != firma_previa:
             if firma == firma_anterior:
                 estables += 1
             else:
                 estables = 0
 
-            if estables >= 1:
+            # Dos lecturas iguales seguidas: la tabla ya dejo de moverse.
+            if estables >= 2:
                 return firma
 
         firma_anterior = firma
@@ -2635,6 +2642,146 @@ def _esperar_cambio_firma(
 
         pagina.wait_for_timeout(espera)
         transcurrido += espera
+
+
+def _recuperar_fila_con_filtro(
+    pagina,
+    actividad,
+    buscador,
+    termino,
+    timeout_ms,
+):
+    """Vuelve a filtrar y recorre las paginas hasta ver la fila exacta.
+
+    Devuelve el locator de la fila, la cadena "DUPLICADA" si aparece mas
+    de una vez, o None si en este intento no se pudo encontrar.
+
+    A diferencia de la version anterior, un fallo al cambiar de pagina no
+    aborta todo el proceso: simplemente termina este intento y el que
+    llama vuelve a probar.
+    """
+    try:
+        buscador.fill("")
+        pagina.wait_for_timeout(400)
+        asegurar_pagina_1(pagina)
+
+        # Pantalla SIN filtro. Sirve para saber cuando el filtro nuevo
+        # ya se aplico de verdad y no estamos leyendo lo anterior.
+        firma_sin_filtro = obtener_firma_pagina(
+            pagina,
+            actividad,
+        )
+
+        buscador.fill(termino)
+
+        _esperar_resultados_busqueda(
+            pagina,
+            actividad,
+            timeout_ms=timeout_ms,
+            firma_previa=firma_sin_filtro,
+        )
+
+        asegurar_pagina_1(pagina)
+    except Exception:
+        return None
+
+    firmas_vistas = set()
+    numero_pagina = 1
+
+    while numero_pagina <= 50:
+
+        try:
+            firma_actual = obtener_firma_pagina(
+                pagina,
+                actividad,
+            )
+        except Exception:
+            return None
+
+        if firma_actual in firmas_vistas:
+            break
+
+        firmas_vistas.add(firma_actual)
+
+        try:
+            resultados = analizar_resultados_pagina(
+                pagina,
+                actividad,
+            )
+        except Exception:
+            return None
+
+        finales = [
+            resultado
+            for resultado in resultados
+            if resultado["coincide"]
+        ]
+
+        if len(finales) > 1:
+            return "DUPLICADA"
+
+        if len(finales) == 1:
+            print("✅ Fila recuperada por escaneo.")
+            return finales[0]["fila"]
+
+        siguiente_numero = numero_pagina + 1
+
+        try:
+            paginas = obtener_paginas_numericas(pagina)
+        except Exception:
+            break
+
+        avanzo = False
+
+        if siguiente_numero in paginas:
+            try:
+                avanzo = ir_a_pagina_numero(
+                    pagina,
+                    siguiente_numero,
+                )
+            except Exception:
+                avanzo = False
+
+        if not avanzo:
+            try:
+                siguiente = encontrar_boton_siguiente(pagina)
+            except Exception:
+                siguiente = None
+
+            if siguiente is None:
+                break
+
+            try:
+                siguiente.click(timeout=5000)
+                _esperar_cambio_firma(
+                    pagina,
+                    actividad,
+                    firma_actual,
+                    timeout_ms=1500,
+                )
+                avanzo = True
+            except Exception:
+                # No se pudo avanzar. No es un error definitivo:
+                # este intento termina y el que llama reintenta.
+                break
+
+        if not avanzo:
+            break
+
+        try:
+            firma_nueva = obtener_firma_pagina(
+                pagina,
+                actividad,
+            )
+        except Exception:
+            break
+
+        if firma_nueva == firma_actual:
+            break
+
+        numero_pagina += 1
+
+    return None
 
 
 # ============================================================
@@ -2907,121 +3054,59 @@ def buscar_actividad_correcta(
     # volver a encontrar la coincidencia exacta. La validación sigue
     # siendo estricta: nombre + semana + unidad + programa + categoría.
 
-    buscador.fill("")
-    pagina.wait_for_timeout(500)
-    asegurar_pagina_1(pagina)
-    buscador.fill(termino_encontrado)
+    # La coincidencia YA quedo confirmada arriba. Aqui solo hay que volver
+    # a dejar esa fila en pantalla, asi que vale la pena insistir: se
+    # reintenta varias veces, con esperas cada vez mayores y probando
+    # todos los terminos que produjeron resultados.
+    terminos_recuperacion = [termino_encontrado]
+    for termino in terminos_busqueda:
+        if termino not in terminos_recuperacion:
+            terminos_recuperacion.append(termino)
 
-    espera_recuperacion = (
-        3200
+    espera_base = (
+        4200
         if actividad["categoria_prizma"] == "CHALLENGE"
-        else 1800
-    )
-    _esperar_resultados_busqueda(
-        pagina,
-        actividad,
-        timeout_ms=espera_recuperacion,
+        else 2600
     )
 
-    asegurar_pagina_1(pagina)
+    for intento in range(1, 4):
 
-    firmas_recuperacion = set()
-    numero_recuperacion = 1
+        espera_intento = espera_base + (intento - 1) * 2500
 
-    while numero_recuperacion <= 50:
+        for termino in terminos_recuperacion:
 
-        firma_actual = obtener_firma_pagina(
-            pagina,
-            actividad,
-        )
-
-        if firma_actual in firmas_recuperacion:
-            break
-
-        firmas_recuperacion.add(
-            firma_actual
-        )
-
-        resultados_finales = analizar_resultados_pagina(
-            pagina,
-            actividad,
-        )
-
-        finales = [
-            resultado
-            for resultado in resultados_finales
-            if resultado["coincide"]
-        ]
-
-        if len(finales) > 1:
-            return (
-                None,
-                "ERROR_ACTIVIDAD_DUPLICADA",
-            )
-
-        if len(finales) == 1:
-            print(
-                "✅ Fila recuperada por escaneo."
-            )
-
-            return (
-                finales[0]["fila"],
-                None,
-            )
-
-        siguiente_numero = (
-            numero_recuperacion + 1
-        )
-
-        paginas = obtener_paginas_numericas(
-            pagina
-        )
-
-        avanzo = False
-
-        if siguiente_numero in paginas:
-            avanzo = ir_a_pagina_numero(
+            resultado_recuperacion = _recuperar_fila_con_filtro(
                 pagina,
-                siguiente_numero,
+                actividad,
+                buscador,
+                termino,
+                espera_intento,
             )
 
-        if not avanzo:
-            siguiente = encontrar_boton_siguiente(
-                pagina
-            )
-
-            if siguiente is None:
-                break
-
-            try:
-                siguiente.click(
-                    timeout=5000
-                )
-                _esperar_cambio_firma(
-                    pagina,
-                    actividad,
-                    firma_actual,
-                    timeout_ms=1200,
-                )
-                avanzo = True
-            except Exception:
+            if resultado_recuperacion == "DUPLICADA":
                 return (
                     None,
-                    "ERROR_RECUPERANDO_PAGINA",
+                    "ERROR_ACTIVIDAD_DUPLICADA",
                 )
 
-        if not avanzo:
-            break
+            if resultado_recuperacion is not None:
+                return (
+                    resultado_recuperacion,
+                    None,
+                )
 
-        firma_nueva = obtener_firma_pagina(
-            pagina,
-            actividad,
+        print(
+            "Reintentando recuperacion de fila (intento",
+            intento,
+            "de 3)...",
         )
 
-        if firma_nueva == firma_actual:
-            break
-
-        numero_recuperacion += 1
+        # Una pausa antes del siguiente intento le da margen a PRIZMA
+        # para terminar de responder.
+        try:
+            pagina.wait_for_timeout(700 * intento)
+        except Exception:
+            pass
 
     return (
         None,
