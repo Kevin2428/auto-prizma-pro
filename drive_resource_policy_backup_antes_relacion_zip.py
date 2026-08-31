@@ -209,14 +209,7 @@ def match_drive_resource_to_zip(
                     f'Drive muestra "{drive_name}", pero por tamaño ({drive_size} bytes) se relacionó con "{_base_name(chosen.get("nombre"))}" del ZIP.',
                 )
             )
-            # Dentro del tipo esperado, un único archivo con exactamente el
-            # mismo tamaño es una identidad binaria suficientemente fuerte.
-            # El nombre puede haber sido truncado/renombrado por la automatización.
-            return MatchResult(
-                entry=chosen,
-                warnings=warnings,
-                verified_same_file=True,
-            )
+            return MatchResult(entry=chosen, warnings=warnings)
 
     # La relación de la fila y su carpeta G ya es autoritativa. Si el resolver
     # histórico de esa misma actividad encuentra un único recurso local,
@@ -230,11 +223,6 @@ def match_drive_resource_to_zip(
             )
         )
         zip_size = _size(chosen.get("tamano"))
-        mismo_tamano = (
-            drive_size is not None
-            and zip_size is not None
-            and drive_size == zip_size
-        )
         if drive_size is not None and zip_size is not None and drive_size != zip_size:
             warnings.append(
                 WarningItem(
@@ -242,11 +230,7 @@ def match_drive_resource_to_zip(
                     f'El recurso relacionado tiene {drive_size} bytes en Drive y {zip_size} bytes en el ZIP; se continuará y se mostrará esta diferencia al final.',
                 )
             )
-        return MatchResult(
-            entry=chosen,
-            warnings=warnings,
-            verified_same_file=mismo_tamano,
-        )
+        return MatchResult(entry=chosen, warnings=warnings)
 
     return MatchResult(error="NO_ZIP_MATCH")
 
