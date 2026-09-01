@@ -1946,10 +1946,9 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
     (nombre + tamano). Si no existe un H5P/PDF compatible, se registra
     ``NO HAY ARCHIVO EN LA CARPETA`` y el analisis continua.
 
-    Drive y ZIP solo quedan habilitados para cargue automatico cuando el nombre
-    canonico del recurso coincide. El tamano se conserva solo como informacion
-    visual y NO participa en la comparacion. Cualquier diferencia de nombre se
-    presenta como advertencia al final, sin cortar el analisis completo.
+    Drive y ZIP solo quedan habilitados para cargue automatico cuando el mismo
+    recurso coincide por nombre canonico + tamano. Cualquier diferencia se
+    presenta como advertencia al final, pero nunca corta el analisis completo.
     """
 
     _DRIVE_THREAD_LOCAL.hoja_objetivo = hoja_objetivo
@@ -1975,6 +1974,10 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         }
 
     indice_zip = _indice_zip_nombre_tamano(ruta_zip)
+    # Índice del motor histórico. Se usa únicamente como fallback por la
+    # MISMA actividad cuando nombre/tamaño directos no bastan para resolver
+    # el miembro del ZIP. No consulta otras hojas ni otros enlaces Drive.
+    indice_motor = motor_prizma_modulo.crear_indice_recursos(ruta_zip)
 
     _t0 = time.perf_counter()
 
@@ -2132,6 +2135,8 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
                     continue
                 if extension_esperada and extension != extension_esperada:
                     continue
+                if item.get("tamano") is None:
+                    continue
                 candidatos_drive.append(item)
 
             if not candidatos_drive:
@@ -2200,6 +2205,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
                 if (
                     extension not in (".h5p", ".pdf")
                     or (extension_esperada and extension != extension_esperada)
+                    or elegido.get("tamano") is None
                 ):
                     elegido = None
 
@@ -2248,6 +2254,26 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
             expected_extension=extension_esperada,
         )
 
+        # Si el nombre/tamaño directo no logra confirmar el recurso, usamos
+        # el resolver histórico SOLO para esta misma actividad. Esto cubre
+        # nombres renombrados/truncados por la automatización del ZIP sin
+        # mezclar archivos de otras filas. El tamaño sigue siendo la prueba
+        # final para habilitar el cargue automático.
+        if not getattr(resultado_match, "verified_same_file", False):
+            fallback_zip = _resolver_zip_por_actividad_fallback(
+                actividad,
+                indice_zip,
+                indice_motor,
+                actividades,
+            )
+            if fallback_zip is not None:
+                resultado_match = match_drive_resource_to_zip(
+                    elegido,
+                    entradas_zip,
+                    expected_extension=extension_esperada,
+                    fallback_entry=fallback_zip,
+                )
+
         for aviso in resultado_match.warnings:
             advertencias.append(_aviso(actividad, aviso.code, aviso.message))
 
@@ -2277,7 +2303,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
             advertencias.append(_aviso(
                 actividad,
                 "SIN_EQUIVALENTE_ZIP",
-                "Drive y ZIP no pudieron confirmarse como el mismo archivo por nombre. "
+                "Drive y ZIP no pudieron confirmarse como el mismo archivo por nombre y tamano. "
                 "El analisis continuo.",
             ))
 
@@ -2389,7 +2415,7 @@ def _prevalidar_recursos_drive_zip_ultrarapido(
         archivos_drive_encontrados,
         "archivo(s) H5P/PDF encontrado(s) en Drive |",
         coincidencias_zip,
-        "coincidencia(s) exacta(s) Drive=ZIP por nombre |",
+        "coincidencia(s) exacta(s) Drive=ZIP por nombre+tamano |",
         len(advertencias),
         "advertencia(s) finales",
     )

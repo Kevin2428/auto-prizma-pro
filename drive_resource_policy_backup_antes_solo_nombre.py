@@ -19,9 +19,8 @@ class MatchResult:
     warnings: list[WarningItem] = field(default_factory=list)
     error: str | None = None
     # True SOLO cuando Drive y ZIP representan el mismo recurso por
-    # nombre canonico. El tamano NO participa en la identidad del recurso.
-    # El analisis puede continuar con False, pero esa fila no queda habilitada
-    # para cargue automatico.
+    # nombre canonico + tamano. El analisis puede continuar con False,
+    # pero esa fila no queda habilitada para cargue automatico.
     verified_same_file: bool = False
 
 
@@ -141,36 +140,116 @@ def match_drive_resource_to_zip(
     expected_extension: str = "",
     fallback_entry: dict[str, Any] | None = None,
 ) -> MatchResult:
-    """Relaciona Drive con ZIP usando SOLO el nombre canonico del recurso.
-
-    El tamano se conserva como metadato para mostrarlo en la interfaz, pero
-    nunca decide si dos recursos son el mismo. ``fallback_entry`` se mantiene
-    en la firma por compatibilidad con versiones anteriores, pero no puede
-    relacionar archivos con nombres distintos.
-    """
-    del fallback_entry  # compatibilidad: intencionalmente no se usa
-
     entries = _filter_expected_extension(zip_entries, expected_extension)
     drive_name = _base_name(drive_item.get("nombre"))
     drive_name_key = _normalized_resource_name(drive_name, expected_extension)
+    drive_size = _size(drive_item.get("tamano"))
 
     same_name = [
-        item
-        for item in entries
-        if _normalized_resource_name(item.get("nombre"), expected_extension)
-        == drive_name_key
+        item for item in entries
+        if _normalized_resource_name(item.get("nombre"), expected_extension) == drive_name_key
     ]
 
-    if len(same_name) == 1:
-        return MatchResult(
-            entry=same_name[0],
-            verified_same_file=True,
-        )
+    warnings: list[WarningItem] = []
 
-    if len(same_name) > 1:
+    if same_name:
+        if drive_size is not None:
+            same_size = [item for item in same_name if _size(item.get("tamano")) == drive_size]
+        else:
+            same_size = []
+
+        if len(same_size) == 1:
+            return MatchResult(entry=same_size[0], verified_same_file=True)
+
+        if len(same_size) > 1:
+            chosen = sorted(same_size, key=lambda item: str(item.get("miembro") or item.get("nombre") or ""))[0]
+            warnings.append(
+                WarningItem(
+                    "IDENTICAL_ZIP_DUPLICATE",
+                    f'El ZIP contiene más de una copia de "{drive_name}" con {drive_size} bytes; se continuará porque son equivalentes por nombre y tamaño.',
+                )
+            )
+            return MatchResult(entry=chosen, warnings=warnings, verified_same_file=True)
+
+        if len(same_name) == 1:
+            chosen = same_name[0]
+            zip_size = _size(chosen.get("tamano"))
+            if drive_size is not None and zip_size is not None and drive_size != zip_size:
+                warnings.append(
+                    WarningItem(
+                        "SIZE_MISMATCH",
+                        f'"{drive_name}" tiene {drive_size} bytes en Drive y {zip_size} bytes en el ZIP; se continuará y se mostrará esta diferencia al final.',
+                    )
+                )
+            return MatchResult(entry=chosen, warnings=warnings)
+
+        if fallback_entry is not None and any(_same_entry(fallback_entry, item) for item in same_name):
+            chosen = next(item for item in same_name if _same_entry(fallback_entry, item))
+            zip_size = _size(chosen.get("tamano"))
+            if drive_size is not None and zip_size is not None and drive_size != zip_size:
+                warnings.append(
+                    WarningItem(
+                        "SIZE_MISMATCH",
+                        f'"{drive_name}" tiene {drive_size} bytes en Drive y {zip_size} bytes en el ZIP; se continuará y se mostrará esta diferencia al final.',
+                    )
+                )
+            return MatchResult(entry=chosen, warnings=warnings)
+
         return MatchResult(error="AMBIGUOUS_SAME_NAME")
 
+    # Si Drive truncó o cambió el nombre, el peso puede identificar de forma
+    # inequívoca el binario local dentro del tipo esperado.
+    if drive_size is not None:
+        same_size = [item for item in entries if _size(item.get("tamano")) == drive_size]
+        if len(same_size) == 1:
+            chosen = same_size[0]
+            warnings.append(
+                WarningItem(
+                    "NAME_MISMATCH_SIZE_MATCH",
+                    f'Drive muestra "{drive_name}", pero por tamaño ({drive_size} bytes) se relacionó con "{_base_name(chosen.get("nombre"))}" del ZIP.',
+                )
+            )
+            # Dentro del tipo esperado, un único archivo con exactamente el
+            # mismo tamaño es una identidad binaria suficientemente fuerte.
+            # El nombre puede haber sido truncado/renombrado por la automatización.
+            return MatchResult(
+                entry=chosen,
+                warnings=warnings,
+                verified_same_file=True,
+            )
+
+    # La relación de la fila y su carpeta G ya es autoritativa. Si el resolver
+    # histórico de esa misma actividad encuentra un único recurso local,
+    # seguimos con él y dejamos visibles las diferencias como advertencias.
+    if fallback_entry is not None:
+        chosen = fallback_entry
+        warnings.append(
+            WarningItem(
+                "NAME_MISMATCH_ACTIVITY_FALLBACK",
+                f'Drive muestra "{drive_name}", mientras que la actividad quedó relacionada con "{_base_name(chosen.get("nombre"))}" en el ZIP.',
+            )
+        )
+        zip_size = _size(chosen.get("tamano"))
+        mismo_tamano = (
+            drive_size is not None
+            and zip_size is not None
+            and drive_size == zip_size
+        )
+        if drive_size is not None and zip_size is not None and drive_size != zip_size:
+            warnings.append(
+                WarningItem(
+                    "SIZE_MISMATCH",
+                    f'El recurso relacionado tiene {drive_size} bytes en Drive y {zip_size} bytes en el ZIP; se continuará y se mostrará esta diferencia al final.',
+                )
+            )
+        return MatchResult(
+            entry=chosen,
+            warnings=warnings,
+            verified_same_file=mismo_tamano,
+        )
+
     return MatchResult(error="NO_ZIP_MATCH")
+
 
 def detect_duplicate_assignments(
     resources: Iterable[dict[str, Any]],
