@@ -2601,6 +2601,7 @@ def _esperar_resultados_busqueda(
             else:
                 estables = 0
 
+            # Dos lecturas iguales seguidas: la tabla ya dejo de moverse.
             if estables >= 2:
                 return firma
 
@@ -2650,75 +2651,136 @@ def _recuperar_fila_con_filtro(
     termino,
     timeout_ms,
 ):
-    """Vuelve a filtrar y recorre las paginas hasta ver la fila exacta."""
+    """Vuelve a filtrar y recorre las paginas hasta ver la fila exacta.
+
+    Devuelve el locator de la fila, la cadena "DUPLICADA" si aparece mas
+    de una vez, o None si en este intento no se pudo encontrar.
+
+    A diferencia de la version anterior, un fallo al cambiar de pagina no
+    aborta todo el proceso: simplemente termina este intento y el que
+    llama vuelve a probar.
+    """
     try:
         buscador.fill("")
         pagina.wait_for_timeout(400)
         asegurar_pagina_1(pagina)
-        firma_sin_filtro = obtener_firma_pagina(pagina, actividad)
-        buscador.fill(termino)
-        _esperar_resultados_busqueda(
-            pagina, actividad, timeout_ms=timeout_ms, firma_previa=firma_sin_filtro
+
+        # Pantalla SIN filtro. Sirve para saber cuando el filtro nuevo
+        # ya se aplico de verdad y no estamos leyendo lo anterior.
+        firma_sin_filtro = obtener_firma_pagina(
+            pagina,
+            actividad,
         )
+
+        buscador.fill(termino)
+
+        _esperar_resultados_busqueda(
+            pagina,
+            actividad,
+            timeout_ms=timeout_ms,
+            firma_previa=firma_sin_filtro,
+        )
+
         asegurar_pagina_1(pagina)
     except Exception:
         return None
 
     firmas_vistas = set()
     numero_pagina = 1
+
     while numero_pagina <= 50:
+
         try:
-            firma_actual = obtener_firma_pagina(pagina, actividad)
+            firma_actual = obtener_firma_pagina(
+                pagina,
+                actividad,
+            )
         except Exception:
             return None
+
         if firma_actual in firmas_vistas:
             break
+
         firmas_vistas.add(firma_actual)
+
         try:
-            resultados = analizar_resultados_pagina(pagina, actividad)
+            resultados = analizar_resultados_pagina(
+                pagina,
+                actividad,
+            )
         except Exception:
             return None
-        finales = [resultado for resultado in resultados if resultado["coincide"]]
+
+        finales = [
+            resultado
+            for resultado in resultados
+            if resultado["coincide"]
+        ]
+
         if len(finales) > 1:
             return "DUPLICADA"
+
         if len(finales) == 1:
             print("✅ Fila recuperada por escaneo.")
             return finales[0]["fila"]
+
         siguiente_numero = numero_pagina + 1
+
         try:
             paginas = obtener_paginas_numericas(pagina)
         except Exception:
             break
+
         avanzo = False
+
         if siguiente_numero in paginas:
             try:
-                avanzo = ir_a_pagina_numero(pagina, siguiente_numero)
+                avanzo = ir_a_pagina_numero(
+                    pagina,
+                    siguiente_numero,
+                )
             except Exception:
                 avanzo = False
+
         if not avanzo:
             try:
                 siguiente = encontrar_boton_siguiente(pagina)
             except Exception:
                 siguiente = None
+
             if siguiente is None:
                 break
+
             try:
                 siguiente.click(timeout=5000)
                 _esperar_cambio_firma(
-                    pagina, actividad, firma_actual, timeout_ms=1500
+                    pagina,
+                    actividad,
+                    firma_actual,
+                    timeout_ms=1500,
                 )
                 avanzo = True
             except Exception:
+                # No se pudo avanzar. No es un error definitivo:
+                # este intento termina y el que llama reintenta.
                 break
+
         if not avanzo:
             break
+
         try:
-            firma_nueva = obtener_firma_pagina(pagina, actividad)
+            firma_nueva = obtener_firma_pagina(
+                pagina,
+                actividad,
+            )
         except Exception:
             break
+
         if firma_nueva == firma_actual:
             break
+
         numero_pagina += 1
+
     return None
 
 
@@ -2992,6 +3054,10 @@ def buscar_actividad_correcta(
     # volver a encontrar la coincidencia exacta. La validación sigue
     # siendo estricta: nombre + semana + unidad + programa + categoría.
 
+    # La coincidencia YA quedo confirmada arriba. Aqui solo hay que volver
+    # a dejar esa fila en pantalla, asi que vale la pena insistir: se
+    # reintenta varias veces, con esperas cada vez mayores y probando
+    # todos los terminos que produjeron resultados.
     terminos_recuperacion = [termino_encontrado]
     for termino in terminos_busqueda:
         if termino not in terminos_recuperacion:
@@ -3004,20 +3070,39 @@ def buscar_actividad_correcta(
     )
 
     for intento in range(1, 4):
+
         espera_intento = espera_base + (intento - 1) * 2500
+
         for termino in terminos_recuperacion:
+
             resultado_recuperacion = _recuperar_fila_con_filtro(
-                pagina, actividad, buscador, termino, espera_intento
+                pagina,
+                actividad,
+                buscador,
+                termino,
+                espera_intento,
             )
+
             if resultado_recuperacion == "DUPLICADA":
-                return (None, "ERROR_ACTIVIDAD_DUPLICADA")
+                return (
+                    None,
+                    "ERROR_ACTIVIDAD_DUPLICADA",
+                )
+
             if resultado_recuperacion is not None:
-                return (resultado_recuperacion, None)
+                return (
+                    resultado_recuperacion,
+                    None,
+                )
+
         print(
             "Reintentando recuperacion de fila (intento",
             intento,
             "de 3)...",
         )
+
+        # Una pausa antes del siguiente intento le da margen a PRIZMA
+        # para terminar de responder.
         try:
             pagina.wait_for_timeout(700 * intento)
         except Exception:
@@ -3799,49 +3884,6 @@ def esperar_patch(
     return None
 
 
-def verificar_guardado_por_reapertura(
-    pagina,
-    actividad,
-    nombre_recurso,
-    estado_navegacion=None,
-):
-    """Confirma el guardado reabriendo la misma actividad una sola vez.
-
-    Se usa solo como respaldo cuando no se capturo el PATCH de PRIZMA.
-    Nunca sustituye un PATCH HTTP con error: solo cubre el caso donde la
-    respuesta no fue observada pero el archivo si quedo guardado.
-    """
-    print("⚠️ PATCH no observado. Verificando el guardado al reabrir la actividad...")
-
-    if not asegurar_listado(pagina):
-        return False
-
-    if not entrar_categoria(
-        pagina,
-        actividad["categoria_prizma"],
-        estado_navegacion,
-    ):
-        return False
-
-    fila, error = buscar_actividad_correcta(pagina, actividad)
-    if error or fila is None:
-        return False
-
-    if not abrir_edicion(pagina, fila):
-        return False
-
-    confirmado = archivo_visible(pagina, nombre_recurso)
-
-    # Esta reapertura es solo de verificacion: no guardamos otra vez.
-    cancelar_edicion_segura(pagina)
-    asegurar_listado(pagina)
-
-    if confirmado:
-        print("✅ Guardado confirmado al reabrir: el recurso ya aparece en PRIZMA.")
-
-    return confirmado
-
-
 # ============================================================
 # LOGIN AUTOMÁTICO
 # ============================================================
@@ -4552,7 +4594,7 @@ def procesar_actividad(
     respuesta_patch = esperar_patch(
         pagina,
         respuestas,
-        timeout_ms=30000,
+        timeout_ms=15000,
     )
 
     captura[
@@ -4561,18 +4603,9 @@ def procesar_actividad(
 
     if respuesta_patch is None:
 
-        if verificar_guardado_por_reapertura(
-            pagina,
-            actividad,
-            nombre_recurso,
-            estado_navegacion,
-        ):
-            return {
-                "ok": True,
-                "error": "",
-                "recurso": nombre_recurso,
-                "confirmacion": "REAPERTURA",
-            }
+        asegurar_listado(
+            pagina
+        )
 
         return {
             "ok": False,
@@ -4632,35 +4665,7 @@ def procesar_actividad(
         "error": "",
         "recurso":
             nombre_recurso,
-        "confirmacion": "PATCH",
     }
-
-
-def _observacion_guardado(resultado):
-    if str((resultado or {}).get("confirmacion") or "").upper() == "REAPERTURA":
-        return "Carga guardada - verificada al reabrir la actividad"
-    return "Carga guardada - PATCH confirmado"
-
-
-def _registrar_respuesta_prizma(response, respuestas, captura):
-    """Guarda y muestra las respuestas no-GET mientras se confirma un guardado."""
-    if not captura.get("activa"):
-        return
-
-    try:
-        metodo = response.request.method.upper()
-        if metodo == "GET":
-            return
-
-        item = {
-            "metodo": metodo,
-            "status": response.status,
-            "url": response.url,
-        }
-        respuestas.append(item)
-        print("PRIZMA HTTP ->", metodo, response.status, str(response.url).split("?", 1)[0])
-    except Exception:
-        pass
 
 
 # ============================================================
@@ -4772,11 +4777,19 @@ def ejecutar_cargue(
             estado_navegacion = {"categoria_actual": None}
 
             def registrar_respuesta(response):
-                _registrar_respuesta_prizma(
-                    response,
-                    respuestas,
-                    captura,
-                )
+                if not captura["activa"]:
+                    return
+                try:
+                    metodo = response.request.method.upper()
+                    if metodo == "GET":
+                        return
+                    respuestas.append({
+                        "metodo": metodo,
+                        "status": response.status,
+                        "url": response.url,
+                    })
+                except Exception:
+                    pass
 
             def abrir_sesion_limpia(motivo=""):
                 nonlocal navegador
@@ -4947,7 +4960,7 @@ def ejecutar_cargue(
                         ruta_reporte,
                         actividad,
                         "OK",
-                        _observacion_guardado(resultado),
+                        "Carga guardada - PATCH confirmado",
                         resultado["recurso"],
                     )
                 else:
