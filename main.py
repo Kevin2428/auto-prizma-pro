@@ -79,6 +79,11 @@ BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
 
+LOGO_PATH = os.path.join(
+    BASE_DIR,
+    "auto_prizma_logo.png",
+)
+
 UPLOADS_DIR = os.path.join(
     BASE_DIR,
     "uploads",
@@ -4023,6 +4028,7 @@ def generar_html(
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Auto Prizma Pro</title>
+        <link rel="icon" type="image/png" href="/auto-prizma-logo.png">
         <style>
             :root {
                 --fondo: #f7f8fc;
@@ -4064,13 +4070,12 @@ def generar_html(
             .logo {
                 width: 44px; height: 44px; border-radius: 13px;
                 display: grid; place-items: center;
-                background: linear-gradient(145deg, #6d5dfc, #4338ca);
-                box-shadow: 0 8px 20px rgba(79, 70, 229, .25);
+                background: transparent;
+                box-shadow: none;
                 flex: 0 0 44px;
+                overflow: hidden;
             }
-            .logo svg { width: 29px; height: 29px; overflow: visible; }
-            .logo svg path:first-child { fill: #fff; }
-            .logo svg path:last-child { fill: #c7d2fe; }
+            .logo-imagen { width: 100%; height: 100%; object-fit: contain; display: block; }
             .marca strong { display: block; font-size: 18px; }
             .marca span { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
 
@@ -4095,6 +4100,77 @@ def generar_html(
 
             .contenido { padding: 28px 34px 45px; max-width: 1500px; width: 100%; margin: 0 auto; }
             .layout-inicio { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 24px; align-items: start; }
+            #google-conexion-panel { grid-column: 1 / -1; }
+
+            .prizma-loader {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(7px);
+    -webkit-backdrop-filter: blur(7px);
+}
+
+.prizma-loader.activo {
+    display: flex;
+}
+
+.loader-contenido {
+    width: min(360px, 92vw);
+    padding: 30px 26px;
+    border-radius: 24px;
+    text-align: center;
+
+    background: rgba(255, 255, 255, 0.20);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+
+    box-shadow:
+        0 20px 60px rgba(31, 41, 55, 0.10),
+        inset 0 1px 0 rgba(255, 255, 255, 0.55);
+
+    backdrop-filter: blur(13px);
+    -webkit-backdrop-filter: blur(13px);
+}
+
+.loader-logo {
+    width: 125px;
+    height: 125px;
+    object-fit: contain;
+    display: block;
+    margin: 0 auto 20px;
+
+    animation: giro-prizma 2.1s linear infinite;
+
+    filter:
+        drop-shadow(0 12px 24px rgba(79, 70, 229, 0.18))
+        drop-shadow(0 0 18px rgba(43, 164, 255, 0.12));
+}
+
+.loader-contenido strong {
+    display: block;
+    font-size: 17px;
+    font-weight: 750;
+    color: #111827;
+}
+
+.loader-contenido span {
+    display: block;
+    margin-top: 8px;
+    color: rgba(71, 84, 103, 0.90);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+@keyframes giro-prizma {
+    to {
+        transform: rotate(360deg);
+    }
+}
 
             .panel {
                 background: var(--panel); border: 1px solid var(--borde); border-radius: 16px;
@@ -4327,14 +4403,18 @@ def generar_html(
         </style><link rel="stylesheet" href="/estilos-responsive.css">
     </head>
     <body>
+        <div id="prizma-loader" class="prizma-loader" role="status" aria-live="polite" aria-hidden="true">
+            <div class="loader-contenido">
+                <img class="loader-logo" src="/auto-prizma-logo.png" alt="">
+                <strong id="prizma-loader-texto">Procesando...</strong>
+                <span>Espera mientras Auto Prizma prepara la información.</span>
+            </div>
+        </div>
         <div class="app">
             <aside class="sidebar">
                 <div class="marca">
                     <div class="logo" aria-label="Auto Prizma Pro">
-                        <svg viewBox="0 0 48 48" aria-hidden="true">
-                            <path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/>
-                            <path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/>
-                        </svg>
+                        <img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Auto Prizma Pro">
                     </div>
                     <div>
                         <strong>Auto Prizma Pro</strong>
@@ -4371,6 +4451,35 @@ def generar_html(
             const bloqueArchivo = document.getElementById('bloque-matriz-archivo');
             const bloqueGoogle = document.getElementById('google-conexion-panel');
             const radiosModo = document.querySelectorAll('input[name="modo_matriz"]');
+            const loader = document.getElementById('prizma-loader');
+            const loaderTexto = document.getElementById('prizma-loader-texto');
+
+            function mostrarLoader(texto) {
+                if (!loader) return;
+                if (loaderTexto && texto) loaderTexto.textContent = texto;
+                loader.classList.add('activo');
+                loader.setAttribute('aria-hidden', 'false');
+            }
+
+            const formularioAnalisis = document.querySelector('form[action="/analizar"]');
+            if (formularioAnalisis) {
+                formularioAnalisis.addEventListener('submit', () => {
+                    mostrarLoader('Analizando matriz y recursos...');
+                });
+            }
+
+            const formularioInicio = document.querySelector('form[action^="/iniciar/"]');
+            if (formularioInicio) {
+                formularioInicio.addEventListener('submit', () => {
+                    mostrarLoader('Procesando cargue...');
+                });
+            }
+
+            window.addEventListener('pageshow', () => {
+                if (!loader) return;
+                loader.classList.remove('activo');
+                loader.setAttribute('aria-hidden', 'true');
+            });
 
             function aplicarModoMatriz() {
                 const seleccionado = document.querySelector('input[name="modo_matriz"]:checked');
@@ -4449,6 +4558,7 @@ RUTAS_PUBLICAS = {
     "/login",
     "/salir",
     "/favicon.ico",
+    "/auto-prizma-logo.png",
     "/estilos-responsive.css",
 }
 
@@ -4618,6 +4728,16 @@ img, svg, video { max-width: 100%; height: auto; }
   .app { grid-template-columns: 1fr !important; }
 }
 """
+
+
+@app.get("/favicon.ico")
+@app.get("/auto-prizma-logo.png")
+def auto_prizma_logo():
+    return FileResponse(
+        LOGO_PATH,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/estilos-responsive.css")
