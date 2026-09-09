@@ -2722,6 +2722,173 @@ def _recuperar_fila_con_filtro(
     return None
 
 
+def _escanear_coincidencias_actuales(
+    pagina,
+    actividad,
+    termino,
+):
+    """Recorre la paginación actual y devuelve solo coincidencias estrictas."""
+    coincidencias = []
+    claves = set()
+    firmas_visitadas = set()
+    numero_logico = 1
+
+    while numero_logico <= 50:
+        firma_actual = obtener_firma_pagina(
+            pagina,
+            actividad,
+        )
+
+        if firma_actual in firmas_visitadas:
+            break
+        firmas_visitadas.add(firma_actual)
+
+        resultados = analizar_resultados_pagina(
+            pagina,
+            actividad,
+        )
+
+        print(
+            "Página",
+            numero_logico,
+            "- candidatos:",
+            len(resultados),
+        )
+
+        for resultado in resultados:
+            if not resultado["coincide"]:
+                continue
+
+            clave = (
+                numero_logico,
+                normalizar_texto(resultado["texto"]),
+            )
+            if clave in claves:
+                continue
+            claves.add(clave)
+
+            coincidencias.append(
+                {
+                    "pagina": numero_logico,
+                    "texto": resultado["texto"],
+                    "termino": termino,
+                    "fila": resultado.get("fila"),
+                }
+            )
+
+        siguiente_numero = numero_logico + 1
+        paginas = obtener_paginas_numericas(pagina)
+
+        if siguiente_numero in paginas:
+            if ir_a_pagina_numero(pagina, siguiente_numero):
+                firma_nueva = obtener_firma_pagina(
+                    pagina,
+                    actividad,
+                )
+                if firma_nueva != firma_actual:
+                    numero_logico += 1
+                    continue
+
+        siguiente = encontrar_boton_siguiente(pagina)
+        if siguiente is None:
+            break
+
+        try:
+            siguiente.click(timeout=5000)
+            _esperar_cambio_firma(
+                pagina,
+                actividad,
+                firma_actual,
+                timeout_ms=1500,
+            )
+        except Exception:
+            break
+
+        firma_nueva = obtener_firma_pagina(
+            pagina,
+            actividad,
+        )
+        if firma_nueva == firma_actual:
+            break
+
+        numero_logico += 1
+
+    return coincidencias
+
+
+def _buscar_termino_estable(
+    pagina,
+    buscador,
+    actividad,
+    termino,
+):
+    """Aplica un término y espera una vista estable antes de leerla."""
+    print("Término de búsqueda:", termino)
+
+    buscador.fill("")
+    pagina.wait_for_timeout(400)
+    asegurar_pagina_1(pagina)
+    firma_sin_filtro = obtener_firma_pagina(
+        pagina,
+        actividad,
+    )
+
+    buscador.fill(termino)
+    espera_busqueda = (
+        4200
+        if actividad["categoria_prizma"] == "CHALLENGE"
+        else 2600
+    )
+    _esperar_resultados_busqueda(
+        pagina,
+        actividad,
+        timeout_ms=espera_busqueda,
+        firma_previa=firma_sin_filtro,
+    )
+
+    asegurar_pagina_1(pagina)
+    pagina.wait_for_timeout(
+        1000
+        if actividad["categoria_prizma"] == "CHALLENGE"
+        else 700
+    )
+
+    return _escanear_coincidencias_actuales(
+        pagina,
+        actividad,
+        termino,
+    )
+
+
+def _buscar_exacta_dos_intentos(
+    pagina,
+    buscador,
+    actividad,
+):
+    """Da dos oportunidades al título exacto antes de ampliar la búsqueda."""
+    termino = str(actividad.get("nombre") or "").strip()
+    primero = _buscar_termino_estable(
+        pagina,
+        buscador,
+        actividad,
+        termino,
+    )
+    if primero:
+        return primero
+
+    try:
+        pagina.wait_for_timeout(900)
+    except Exception:
+        pass
+
+    return _buscar_termino_estable(
+        pagina,
+        buscador,
+        actividad,
+        termino,
+    )
+
+
 # ============================================================
 # BUSCAR ACTIVIDAD
 # ============================================================
@@ -2736,22 +2903,18 @@ def buscar_actividad_correcta(
         "Buscando actividad:",
         actividad["nombre"],
     )
-
     print(
         "Programa:",
         actividad["programa"],
     )
-
     print(
         "Semana:",
         actividad["semana"],
     )
-
     print(
         "Unidad:",
         actividad["unidad"],
     )
-
     print(
         "Categoría:",
         actividad["categoria_prizma"],
@@ -2760,198 +2923,67 @@ def buscar_actividad_correcta(
     buscador = pagina.locator(
         'input[placeholder="Buscar..."]'
     )
-
     buscador.wait_for(
         state="visible",
         timeout=30000,
     )
 
-    if actividad[
-        "categoria_prizma"
-    ] == "CHALLENGE":
+    nombre_exacto = str(
+        actividad.get("nombre") or ""
+    ).strip()
 
-        terminos_busqueda = (
-            obtener_terminos_busqueda_reto(
-                actividad["nombre"]
-            )
+    if actividad["categoria_prizma"] == "CHALLENGE":
+        terminos_busqueda = obtener_terminos_busqueda_reto(
+            nombre_exacto
         )
-
     else:
-
-        terminos_busqueda = (
-            obtener_terminos_busqueda_general(
-                actividad["nombre"]
-            )
+        terminos_busqueda = obtener_terminos_busqueda_general(
+            nombre_exacto
         )
 
-    coincidencias = []
-    claves_coincidencias = set()
-    termino_encontrado = None
+    # El título exacto recibe dos oportunidades estables antes de ampliar
+    # la búsqueda. Esto evita falsos negativos cuando PRIZMA todavía muestra
+    # la tabla anterior al momento de leerla.
+    coincidencias = _buscar_exacta_dos_intentos(
+        pagina,
+        buscador,
+        actividad,
+    )
+    termino_encontrado = nombre_exacto if coincidencias else None
 
-    for termino_busqueda in terminos_busqueda:
-
-        print(
-            "Término de búsqueda:",
-            termino_busqueda,
+    if len(coincidencias) > 1:
+        print("Coincidencias exactas:", len(coincidencias))
+        return (
+            None,
+            "ERROR_ACTIVIDAD_DUPLICADA",
         )
 
-        buscador.fill("")
+    # Solo si los dos intentos exactos quedaron en cero usamos los fallbacks
+    # existentes. La validación de la fila continúa siendo estricta.
+    if not coincidencias:
+        exacto_normalizado = normalizar_texto(nombre_exacto)
+        for termino_busqueda in terminos_busqueda:
+            if normalizar_texto(termino_busqueda) == exacto_normalizado:
+                continue
 
-        pagina.wait_for_timeout(
-            500
-        )
-
-        asegurar_pagina_1(
-            pagina
-        )
-
-        buscador.fill(
-            termino_busqueda
-        )
-
-        espera_busqueda = (
-            4200
-            if actividad["categoria_prizma"] == "CHALLENGE"
-            else 2600
-        )
-
-        _esperar_resultados_busqueda(
-            pagina,
-            actividad,
-            timeout_ms=espera_busqueda,
-        )
-
-        asegurar_pagina_1(
-            pagina
-        )
-
-        coincidencias_intento = []
-        firmas_visitadas = set()
-        numero_logico = 1
-
-        while numero_logico <= 50:
-
-            firma_actual = obtener_firma_pagina(
+            coincidencias_intento = _buscar_termino_estable(
                 pagina,
+                buscador,
                 actividad,
+                termino_busqueda,
             )
 
-            if firma_actual in firmas_visitadas:
-                break
-
-            firmas_visitadas.add(
-                firma_actual
-            )
-
-            resultados = analizar_resultados_pagina(
-                pagina,
-                actividad,
-            )
-
-            print(
-                "Página",
-                numero_logico,
-                "- candidatos:",
-                len(resultados),
-            )
-
-            for resultado in resultados:
-
-                if resultado[
-                    "coincide"
-                ]:
-
-                    clave = (
-                        numero_logico,
-                        normalizar_texto(
-                            resultado["texto"]
-                        ),
-                    )
-
-                    if clave not in claves_coincidencias:
-                        claves_coincidencias.add(
-                            clave
-                        )
-                        coincidencia = {
-                            "pagina":
-                                numero_logico,
-
-                            "texto":
-                                resultado["texto"],
-
-                            "termino":
-                                termino_busqueda,
-                        }
-                        coincidencias.append(
-                            coincidencia
-                        )
-                        coincidencias_intento.append(
-                            coincidencia
-                        )
-
-            siguiente_numero = (
-                numero_logico + 1
-            )
-
-            paginas = obtener_paginas_numericas(
-                pagina
-            )
-
-            if siguiente_numero in paginas:
-
-                if ir_a_pagina_numero(
-                    pagina,
-                    siguiente_numero,
-                ):
-
-                    firma_nueva = obtener_firma_pagina(
-                        pagina,
-                        actividad,
-                    )
-
-                    if firma_nueva != firma_actual:
-
-                        numero_logico += 1
-                        continue
-
-            siguiente = encontrar_boton_siguiente(
-                pagina
-            )
-
-            if siguiente is None:
-                break
-
-            try:
-
-                siguiente.click(
-                    timeout=5000
+            if len(coincidencias_intento) > 1:
+                print("Coincidencias exactas:", len(coincidencias_intento))
+                return (
+                    None,
+                    "ERROR_ACTIVIDAD_DUPLICADA",
                 )
 
-                _esperar_cambio_firma(
-                    pagina,
-                    actividad,
-                    firma_actual,
-                    timeout_ms=1200,
-                )
-
-            except Exception:
+            if len(coincidencias_intento) == 1:
+                coincidencias = coincidencias_intento
+                termino_encontrado = termino_busqueda
                 break
-
-            firma_nueva = obtener_firma_pagina(
-                pagina,
-                actividad,
-            )
-
-            if firma_nueva == firma_actual:
-                break
-
-            numero_logico += 1
-
-        # Si el término actual ya encontró la coincidencia exacta,
-        # no necesitamos ampliar la búsqueda del reto.
-        if coincidencias_intento:
-            termino_encontrado = termino_busqueda
-            break
 
     print(
         "Coincidencias exactas:",
@@ -2959,39 +2991,40 @@ def buscar_actividad_correcta(
     )
 
     if len(coincidencias) == 0:
-
         return (
             None,
             "ERROR_ACTIVIDAD_NO_ENCONTRADA",
         )
 
     if len(coincidencias) > 1:
-
         return (
             None,
             "ERROR_ACTIVIDAD_DUPLICADA",
         )
 
-    # Para recuperar la misma vista debemos conservar el término que
-    # produjo la coincidencia, especialmente en el fallback de Retos.
+    coincidencia = coincidencias[0]
     if termino_encontrado is None:
-        termino_encontrado = coincidencias[
-            0
-        ].get(
+        termino_encontrado = coincidencia.get(
             "termino",
-            actividad["nombre"],
+            nombre_exacto,
         )
 
-    # --------------------------------------------------------
-    # RECUPERAR FILA POR ESCANEO REAL
-    # --------------------------------------------------------
-    # Antes intentábamos regresar a un número lógico de página. En
-    # Retos Evaluativos la paginación puede reordenarse o cambiar al
-    # refrescar el filtro, provocando ERROR_RECUPERANDO_PAGINA/FILA.
-    # Ahora repetimos el mismo filtro y recorremos las páginas hasta
-    # volver a encontrar la coincidencia exacta. La validación sigue
-    # siendo estricta: nombre + semana + unidad + programa + categoría.
+    # Camino rápido y más estable: la fila que acabamos de validar sigue
+    # visible en la misma vista, así que no repetimos la búsqueda.
+    fila_directa = coincidencia.get("fila")
+    if fila_directa is not None:
+        try:
+            if fila_directa.is_visible():
+                print("✅ Fila exacta reutilizada sin nueva búsqueda.")
+                return (
+                    fila_directa,
+                    None,
+                )
+        except Exception:
+            pass
 
+    # Si PRIZMA refrescó el DOM entre la lectura y el clic, recuperamos la
+    # misma fila con el mecanismo robusto existente.
     terminos_recuperacion = [termino_encontrado]
     for termino in terminos_busqueda:
         if termino not in terminos_recuperacion:
@@ -3007,12 +3040,23 @@ def buscar_actividad_correcta(
         espera_intento = espera_base + (intento - 1) * 2500
         for termino in terminos_recuperacion:
             resultado_recuperacion = _recuperar_fila_con_filtro(
-                pagina, actividad, buscador, termino, espera_intento
+                pagina,
+                actividad,
+                buscador,
+                termino,
+                espera_intento,
             )
             if resultado_recuperacion == "DUPLICADA":
-                return (None, "ERROR_ACTIVIDAD_DUPLICADA")
+                return (
+                    None,
+                    "ERROR_ACTIVIDAD_DUPLICADA",
+                )
             if resultado_recuperacion is not None:
-                return (resultado_recuperacion, None)
+                return (
+                    resultado_recuperacion,
+                    None,
+                )
+
         print(
             "Reintentando recuperacion de fila (intento",
             intento,
@@ -3027,7 +3071,6 @@ def buscar_actividad_correcta(
         None,
         "ERROR_RECUPERANDO_FILA",
     )
-
 
 # ============================================================
 # ABRIR EDICIÓN

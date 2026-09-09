@@ -2908,6 +2908,39 @@ print(
 # CONVERTIR CSV A XLSX INTERNO
 # ============================================================
 
+def _validar_origen_matriz(modo, google_sheet_url=None, nombre_archivo=None):
+    """Valida que la matriz provenga de una sola fuente: link o archivo."""
+    modo = str(modo or "").strip().lower()
+    tiene_link = bool(str(google_sheet_url or "").strip())
+    tiene_archivo = bool(str(nombre_archivo or "").strip())
+
+    if modo not in {"link", "archivo"}:
+        return False, "Selecciona si cargarás la matriz por link o por archivo."
+
+    if tiene_link and tiene_archivo:
+        return False, "Usa una sola fuente de matriz: por link o por archivo."
+
+    if modo == "link":
+        if not tiene_link:
+            return False, "Pega el enlace de Google Sheets."
+        if tiene_archivo:
+            return False, "Usa una sola fuente de matriz: por link o por archivo."
+        return True, ""
+
+    if not tiene_archivo:
+        return False, "Selecciona un archivo XLSX o CSV."
+    if tiene_link:
+        return False, "Usa una sola fuente de matriz: por link o por archivo."
+    return True, ""
+
+
+def _extension_matriz_archivo(nombre_archivo):
+    extension = os.path.splitext(str(nombre_archivo or ""))[1].lower()
+    if extension not in {".xlsx", ".csv"}:
+        raise ValueError("La matriz local debe ser un archivo .xlsx o .csv.")
+    return extension
+
+
 def convertir_csv_a_xlsx(
     contenido_csv,
 ):
@@ -2989,6 +3022,29 @@ def convertir_csv_a_xlsx(
     libro.save(salida)
 
     return salida.getvalue()
+
+
+def _normalizar_contenido_matriz_archivo(nombre_archivo, contenido):
+    nombre_visible = os.path.basename(str(nombre_archivo or "").strip())
+    extension = _extension_matriz_archivo(nombre_visible)
+    if not contenido:
+        raise ValueError("La matriz local está vacía.")
+
+    if extension == ".csv":
+        contenido_xlsx = convertir_csv_a_xlsx(contenido)
+    else:
+        contenido_xlsx = bytes(contenido)
+        try:
+            libro_prueba = load_workbook(
+                BytesIO(contenido_xlsx),
+                read_only=True,
+                data_only=False,
+            )
+            libro_prueba.close()
+        except Exception as error:
+            raise ValueError("El archivo XLSX no es válido.") from error
+
+    return contenido_xlsx, nombre_visible
 
 
 # ============================================================
@@ -3483,7 +3539,7 @@ def generar_html(
 
         {bloque_error}
 
-        {bloque_google}
+        <div id="google-conexion-panel">{bloque_google}</div>
 
         <form
             id="cargue-principal"
@@ -3492,16 +3548,29 @@ def generar_html(
             enctype="multipart/form-data"
             class="panel panel-principal"
         >
+            <div class="selector-modo-matriz" style="display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap;">
+                <label style="flex:1;min-width:180px;border:1px solid #d8d5ff;border-radius:12px;padding:12px 14px;cursor:pointer;background:#f8f7ff;">
+                    <input type="radio" name="modo_matriz" value="link" checked>
+                    <strong style="margin-left:7px;">🔗 Por link</strong>
+                    <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Google Sheets + ZIP</span>
+                </label>
+                <label style="flex:1;min-width:180px;border:1px solid #e5e7ef;border-radius:12px;padding:12px 14px;cursor:pointer;">
+                    <input type="radio" name="modo_matriz" value="archivo">
+                    <strong style="margin-left:7px;">📄 Por archivo</strong>
+                    <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">XLSX/CSV + ZIP</span>
+                </label>
+            </div>
+
             <div class="titulo-seccion">
                 <span class="numero-seccion">1</span>
                 <div>
-                    <h2>Archivos</h2>
-                    <p>Pega el enlace de Google Sheets y selecciona el paquete de recursos.</p>
+                    <h2>Matriz y recursos</h2>
+                    <p>Elige si usarás un enlace de Google Sheets o un archivo XLSX/CSV, y selecciona el ZIP.</p>
                 </div>
             </div>
 
             <div class="grid-archivos">
-                <div class="tarjeta-archivo">
+                <div class="tarjeta-archivo" id="bloque-matriz-link">
                     <div class="archivo-cabecera">
                         <div class="archivo-icono verde" aria-hidden="true">
                             <svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M9 11l6 6M15 11l-6 6"/></svg>
@@ -3518,11 +3587,33 @@ def generar_html(
                             name="google_sheet_url"
                             placeholder="https://docs.google.com/spreadsheets/d/..."
                             autocomplete="off"
-                            required
                             style="display:block;width:100%;border:0;outline:0;background:transparent;color:#101828;font:inherit;font-size:12px;"
                         >
                     </div>
                 </div>
+
+                <label class="tarjeta-archivo zona-drop" id="bloque-matriz-archivo" for="archivo-matriz" data-input="archivo-matriz" style="display:none;">
+                    <div class="archivo-cabecera">
+                        <div class="archivo-icono verde" aria-hidden="true">
+                            <svg viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M8 12h8M8 16h8"/></svg>
+                        </div>
+                        <div>
+                            <strong>Archivo de matriz</strong>
+                            <span>Selecciona un XLSX o CSV descargado.</span>
+                        </div>
+                    </div>
+                    <div class="selector-archivo">
+                        <span class="boton-selector">Seleccionar archivo</span>
+                        <span id="nombre-matriz" class="nombre-archivo">Ningún archivo seleccionado</span>
+                    </div>
+                    <input
+                        id="archivo-matriz"
+                        type="file"
+                        name="matriz_archivo"
+                        accept=".xlsx,.csv"
+                        disabled
+                    >
+                </label>
 
                 <label class="tarjeta-archivo zona-drop" for="archivo-zip" data-input="archivo-zip">
                     <div class="archivo-cabecera">
@@ -3602,7 +3693,7 @@ def generar_html(
 
         <aside id="ayuda" class="panel panel-ayuda">
             <h3>¿Cómo funciona?</h3>
-            <div class="paso"><b>1</b><span>Pega el enlace de Google Sheets de la matriz.</span></div>
+            <div class="paso"><b>1</b><span>Elige Por link o Por archivo para suministrar la matriz.</span></div>
             <div class="paso"><b>2</b><span>Sube el ZIP con los recursos correspondientes.</span></div>
             <div class="paso"><b>3</b><span>Selecciona los tipos de actividades.</span></div>
             <div class="paso"><b>4</b><span>Analiza, revisa y luego inicia el cargue.</span></div>
@@ -3610,7 +3701,7 @@ def generar_html(
             <div class="ayuda-separador"></div>
 
             <h3 class="titulo-consejos">Consejos</h3>
-            <p class="consejo">✓ La matriz debe conservar los enlaces de Google Drive de cada recurso.</p>
+            <p class="consejo">✓ En modo link, la matriz debe conservar los enlaces de Google Drive. En modo archivo no necesitas Google.</p>
             <p class="consejo">✓ El ZIP debe contener los H5P y PDF correspondientes.</p>
             <p class="consejo">✓ Revisa el análisis antes de iniciar el cargue.</p>
         </aside>
@@ -3629,6 +3720,10 @@ def generar_html(
         total_h5p = 0
         total_pdf = 0
         filas_html = ""
+
+        origen_matriz = str(resultado.get("origen_matriz") or "link").strip().lower()
+        nombre_matriz = str(resultado.get("nombre_matriz") or "").strip()
+        es_modo_archivo = origen_matriz == "archivo"
 
         drive_info = resultado.get("drive") or {}
         drive_validados = int(drive_info.get("validadas_drive") or 0)
@@ -3675,18 +3770,25 @@ def generar_html(
                     (str(hoja.get("hoja") or ""), int(actividad.get("fila") or 0)),
                     {},
                 )
-                archivo_drive = str(
-                    recurso_drive.get("archivo")
-                    or "NO HAY ARCHIVO EN LA CARPETA"
-                )
-                tamano_drive = recurso_drive.get("tamano_drive")
-                tamano_drive_txt = (
-                    _bytes_legibles(tamano_drive)
-                    if tamano_drive is not None
-                    else ""
-                )
-                coincide_zip = bool(recurso_drive.get("coincide_zip"))
-                estado_zip = "ZIP COINCIDE" if coincide_zip else "REVISAR ZIP"
+
+                if es_modo_archivo:
+                    archivo_drive = "Se resolverá desde el ZIP"
+                    tamano_drive_txt = ""
+                    coincide_zip = False
+                    estado_zip = "Validación segura al cargar"
+                else:
+                    archivo_drive = str(
+                        recurso_drive.get("archivo")
+                        or "NO HAY ARCHIVO EN LA CARPETA"
+                    )
+                    tamano_drive = recurso_drive.get("tamano_drive")
+                    tamano_drive_txt = (
+                        _bytes_legibles(tamano_drive)
+                        if tamano_drive is not None
+                        else ""
+                    )
+                    coincide_zip = bool(recurso_drive.get("coincide_zip"))
+                    estado_zip = "ZIP COINCIDE" if coincide_zip else "REVISAR ZIP"
 
                 filas_html += f"""
                 <tr>
@@ -3800,12 +3902,29 @@ def generar_html(
             </div>
             """
 
+        if es_modo_archivo:
+            resumen_origen = (
+                "Modo archivo · " + e(nombre_matriz or "Matriz local")
+                + " · " + str(int((resultado.get("zip") or {}).get("total") or 0))
+                + " recurso(s) H5P/PDF detectado(s) en el ZIP"
+            )
+            encabezado_recurso = "Resolución de recurso"
+            encabezado_estado = "Estado"
+        else:
+            resumen_origen = (
+                str(total_actividades) + " actividades analizadas · "
+                + str(drive_validados) + " archivo(s) encontrado(s) en Drive · "
+                + str(drive_coincidencias_zip) + " coincidencia(s) exacta(s) con el ZIP"
+            )
+            encabezado_recurso = "Archivo Drive"
+            encabezado_estado = "Estado ZIP"
+
         contenido = f"""
         <section id="cargue-principal" class="encabezado-exito panel">
             <div class="check-grande">✓</div>
             <div>
                 <h1>Análisis completado</h1>
-                <p>{total_actividades} actividades analizadas · {drive_validados} archivo(s) encontrado(s) en Drive · {drive_coincidencias_zip} coincidencia(s) exacta(s) con el ZIP</p>
+                <p>{resumen_origen}</p>
             </div>
         </section>
 
@@ -3837,8 +3956,8 @@ def generar_html(
                                 <th>Actividad</th>
                                 <th>Categoría</th>
                                 <th>Tipo</th>
-                                <th>Archivo Drive</th>
-                                <th>Estado ZIP</th>
+                                <th>{e(encabezado_recurso)}</th>
+                                <th>{e(encabezado_estado)}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -4247,6 +4366,31 @@ def generar_html(
         <script>
             const matriz = document.getElementById('archivo-matriz');
             const zip = document.getElementById('archivo-zip');
+            const googleUrl = document.getElementById('google-sheet-url');
+            const bloqueLink = document.getElementById('bloque-matriz-link');
+            const bloqueArchivo = document.getElementById('bloque-matriz-archivo');
+            const bloqueGoogle = document.getElementById('google-conexion-panel');
+            const radiosModo = document.querySelectorAll('input[name="modo_matriz"]');
+
+            function aplicarModoMatriz() {
+                const seleccionado = document.querySelector('input[name="modo_matriz"]:checked');
+                const modo = seleccionado ? seleccionado.value : 'link';
+                const esArchivo = modo === 'archivo';
+                if (bloqueLink) bloqueLink.style.display = esArchivo ? 'none' : '';
+                if (bloqueArchivo) bloqueArchivo.style.display = esArchivo ? '' : 'none';
+                if (bloqueGoogle) bloqueGoogle.style.display = esArchivo ? 'none' : '';
+                if (googleUrl) {
+                    googleUrl.disabled = esArchivo;
+                    googleUrl.required = !esArchivo;
+                }
+                if (matriz) {
+                    matriz.disabled = !esArchivo;
+                    matriz.required = esArchivo;
+                }
+            }
+
+            radiosModo.forEach((radio) => radio.addEventListener('change', aplicarModoMatriz));
+            aplicarModoMatriz();
 
             function actualizarNombre(input, destinoId) {
                 const destino = document.getElementById(destinoId);
@@ -4922,56 +5066,60 @@ def inicio():
     response_class=HTMLResponse,
 )
 async def analizar(
-    google_sheet_url: str = Form(...),
     recursos: UploadFile = File(...),
+    modo_matriz: str = Form(default="link"),
+    google_sheet_url: str | None = Form(default=None),
+    matriz_archivo: UploadFile | None = File(default=None),
     ovi: str | None = Form(default=None),
     ova: str | None = Form(default=None),
     retos: str | None = Form(default=None),
 ):
 
     try:
+        nombre_archivo_matriz = (
+            str(getattr(matriz_archivo, "filename", "") or "").strip()
+            if matriz_archivo is not None
+            else ""
+        )
+        modo_matriz = str(modo_matriz or "").strip().lower()
 
-        if not recursos.filename.lower().endswith(
-            ".zip"
-        ):
+        origen_ok, error_origen = _validar_origen_matriz(
+            modo_matriz,
+            google_sheet_url,
+            nombre_archivo_matriz,
+        )
+        if not origen_ok:
+            return generar_html(error=error_origen)
 
+        if not str(recursos.filename or "").lower().endswith(".zip"):
             return generar_html(
-                error=(
-                    "Los recursos deben estar "
-                    "en un archivo .zip"
-                )
+                error="Los recursos deben estar en un archivo .zip"
             )
 
-        procesar_ovi = (
-            ovi is not None
-        )
+        procesar_ovi = ovi is not None
+        procesar_ova = ova is not None
+        procesar_retos = retos is not None
 
-        procesar_ova = (
-            ova is not None
-        )
-
-        procesar_retos = (
-            retos is not None
-        )
-
-        if (
-            not procesar_ovi
-            and not procesar_ova
-            and not procesar_retos
-        ):
-
+        if not procesar_ovi and not procesar_ova and not procesar_retos:
             return generar_html(
-                error=(
-                    "Selecciona OVI, OVA y/o Retos Evaluativos."
-                )
+                error="Selecciona OVI, OVA y/o Retos Evaluativos."
             )
 
-        contenido_excel = descargar_google_sheet_xlsx(
-            google_sheet_url
-        )
-
-        # Solo se procesa la pestaña que viene en el enlace (#gid=...).
-        hoja_objetivo = _resolver_hoja_objetivo(google_sheet_url)
+        if modo_matriz == "link":
+            google_sheet_url = str(google_sheet_url or "").strip()
+            contenido_excel = descargar_google_sheet_xlsx(
+                google_sheet_url
+            )
+            # Solo se procesa la pestaña que viene en el enlace (#gid=...).
+            hoja_objetivo = _resolver_hoja_objetivo(google_sheet_url)
+            nombre_matriz = hoja_objetivo or "Google Sheets"
+        else:
+            contenido_original = await matriz_archivo.read()
+            contenido_excel, nombre_matriz = _normalizar_contenido_matriz_archivo(
+                nombre_archivo_matriz,
+                contenido_original,
+            )
+            hoja_objetivo = None
 
         contenido_zip = await recursos.read()
 
@@ -4984,8 +5132,7 @@ async def analizar(
         )
 
         if not hojas:
-
-            if hoja_objetivo:
+            if modo_matriz == "link" and hoja_objetivo:
                 return generar_html(
                     error=(
                         "La pestaña \"" + hoja_objetivo + "\" no tiene una "
@@ -4996,205 +5143,127 @@ async def analizar(
                 )
 
             return generar_html(
-                error=(
-                    "No encontré una matriz "
-                    "PRIZMA válida."
-                )
+                error="No encontré una matriz PRIZMA válida."
             )
 
         try:
-
-            zip_info = analizar_zip(
-                contenido_zip
-            )
-
+            zip_info = analizar_zip(contenido_zip)
         except zipfile.BadZipFile:
-
-            return generar_html(
-                error=(
-                    "El ZIP no es válido."
-                )
-            )
+            return generar_html(error="El ZIP no es válido.")
 
         # ====================================================
         # CREAR TRABAJO
         # ====================================================
 
         trabajo_id = uuid.uuid4().hex
+        carpeta_trabajo = os.path.join(UPLOADS_DIR, trabajo_id)
+        os.makedirs(carpeta_trabajo, exist_ok=True)
 
-        carpeta_trabajo = os.path.join(
-            UPLOADS_DIR,
-            trabajo_id,
-        )
+        ruta_excel = os.path.join(carpeta_trabajo, "matriz.xlsx")
+        ruta_zip = os.path.join(carpeta_trabajo, "recursos.zip")
 
-        os.makedirs(
-            carpeta_trabajo,
-            exist_ok=True,
-        )
+        with open(ruta_excel, "wb") as archivo:
+            archivo.write(contenido_excel)
 
-        ruta_excel = os.path.join(
-            carpeta_trabajo,
-            "matriz.xlsx",
-        )
+        with open(ruta_zip, "wb") as archivo:
+            archivo.write(contenido_zip)
 
-        ruta_zip = os.path.join(
-            carpeta_trabajo,
-            "recursos.zip",
-        )
+        carpeta_temp = os.path.join(TEMP_DIR, trabajo_id)
+        os.makedirs(carpeta_temp, exist_ok=True)
 
-        with open(
-            ruta_excel,
-            "wb",
-        ) as archivo:
-
-            archivo.write(
-                contenido_excel
+        if modo_matriz == "link":
+            preflight_drive = _prevalidar_recursos_drive_zip_ultrarapido(
+                google_sheet_url,
+                ruta_excel,
+                ruta_zip,
+                procesar_ovi,
+                procesar_ova,
+                procesar_retos,
+                hoja_objetivo,
             )
 
-        with open(
-            ruta_zip,
-            "wb",
-        ) as archivo:
-
-            archivo.write(
-                contenido_zip
+            recursos_drive_resueltos = preflight_drive.pop(
+                "_mapa_resueltos",
+                {},
             )
 
-        carpeta_temp = os.path.join(
-            TEMP_DIR,
-            trabajo_id,
-        )
+            if not preflight_drive.get("ok"):
+                errores_drive = preflight_drive.get("errores") or []
+                resumen_errores = " | ".join(errores_drive[:8])
 
-        os.makedirs(
-            carpeta_temp,
-            exist_ok=True,
-        )
+                if len(errores_drive) > 8:
+                    resumen_errores += (
+                        " | ... y "
+                        + str(len(errores_drive) - 8)
+                        + " error(es) más."
+                    )
 
-        preflight_drive = _prevalidar_recursos_drive_zip_ultrarapido(
-            google_sheet_url,
-            ruta_excel,
-            ruta_zip,
-            procesar_ovi,
-            procesar_ova,
-            procesar_retos,
-            hoja_objetivo,
-        )
+                shutil.rmtree(carpeta_trabajo, ignore_errors=True)
+                shutil.rmtree(carpeta_temp, ignore_errors=True)
 
-        recursos_drive_resueltos = preflight_drive.pop(
-            "_mapa_resueltos",
-            {},
-        )
-
-        if not preflight_drive.get("ok"):
-            errores_drive = preflight_drive.get("errores") or []
-            resumen_errores = " | ".join(errores_drive[:8])
-
-            if len(errores_drive) > 8:
-                resumen_errores += (
-                    " | ... y "
-                    + str(len(errores_drive) - 8)
-                    + " error(es) más."
+                return generar_html(
+                    error=(
+                        "La validación Google Drive vs ZIP encontró problemas. "
+                        + resumen_errores
+                    )
                 )
-
-            shutil.rmtree(carpeta_trabajo, ignore_errors=True)
-            shutil.rmtree(carpeta_temp, ignore_errors=True)
-
-            return generar_html(
-                error=(
-                    "La validación Google Drive vs ZIP encontró problemas. "
-                    + resumen_errores
-                )
-            )
+        else:
+            # En modo archivo no se consulta Google. El motor conserva su
+            # resolvedor seguro de recursos del ZIP y nunca elige ambiguos.
+            recursos_drive_resueltos = {}
+            preflight_drive = {
+                "ok": True,
+                "modo": "archivo",
+                "total_actividades": sum(
+                    len(hoja.get("actividades") or []) for hoja in hojas
+                ),
+                "validadas_drive": 0,
+                "coincidencias_zip": 0,
+                "errores": [],
+                "advertencias": [],
+                "recursos": [],
+            }
 
         cursos_trabajo = _cursos_desde_hojas(hojas)
-
         ruta_reporte = os.path.join(
             RESULTADOS_DIR,
             _nombre_reporte(cursos_trabajo, trabajo_id),
         )
 
-        TRABAJOS[
-            trabajo_id
-        ] = {
-            "id":
-                trabajo_id,
-
-            "ruta_excel":
-                ruta_excel,
-
-            "ruta_zip":
-                ruta_zip,
-
-            "carpeta_temp":
-                carpeta_temp,
-
-            "ruta_reporte":
-                ruta_reporte,
-
-            "procesar_ovi":
-                procesar_ovi,
-
-            "procesar_ova":
-                procesar_ova,
-
-            "procesar_retos":
-                procesar_retos,
-
-            "etapa":
-                "analizado",
-
-            "mensaje":
-                "Archivos analizados correctamente.",
-
-            "total":
-                0,
-
-            "procesadas":
-                0,
-
-            "exitosas":
-                0,
-
-            "errores":
-                0,
-
-            "terminado":
-                False,
-
-            "detalle_actividades":
-                [],
-
-            "recursos_drive_resueltos":
-                recursos_drive_resueltos,
-
-            "hoja_objetivo":
-                hoja_objetivo,
-
-            "usuario_app":
-                _usuario_actual(),
-
-            "cursos":
-                cursos_trabajo,
-
-            "historial_registrado":
-                False,
-
-            "creado_en":
-                _ahora_colombia_iso(),
-
-            "cancelar_solicitado":
-                False,
+        TRABAJOS[trabajo_id] = {
+            "id": trabajo_id,
+            "ruta_excel": ruta_excel,
+            "ruta_zip": ruta_zip,
+            "carpeta_temp": carpeta_temp,
+            "ruta_reporte": ruta_reporte,
+            "procesar_ovi": procesar_ovi,
+            "procesar_ova": procesar_ova,
+            "procesar_retos": procesar_retos,
+            "etapa": "analizado",
+            "mensaje": "Archivos analizados correctamente.",
+            "total": 0,
+            "procesadas": 0,
+            "exitosas": 0,
+            "errores": 0,
+            "terminado": False,
+            "detalle_actividades": [],
+            "recursos_drive_resueltos": recursos_drive_resueltos,
+            "hoja_objetivo": hoja_objetivo,
+            "origen_matriz": modo_matriz,
+            "nombre_matriz": nombre_matriz,
+            "usuario_app": _usuario_actual(),
+            "cursos": cursos_trabajo,
+            "historial_registrado": False,
+            "creado_en": _ahora_colombia_iso(),
+            "cancelar_solicitado": False,
         }
 
         resultado = {
-            "hojas":
-                hojas,
-
-            "zip":
-                zip_info,
-
-            "drive":
-                preflight_drive,
+            "hojas": hojas,
+            "zip": zip_info,
+            "drive": preflight_drive,
+            "origen_matriz": modo_matriz,
+            "nombre_matriz": nombre_matriz,
         }
 
         TRABAJOS[trabajo_id]["resultado_analisis"] = resultado
@@ -5205,10 +5274,7 @@ async def analizar(
         )
 
     except Exception as e:
-
-        return generar_html(
-            error=str(e)
-        )
+        return generar_html(error=str(e))
 
 
 # ============================================================
@@ -5555,29 +5621,74 @@ def _formatear_inicio_cargue(fecha_iso):
         return "En progreso"
 
 
-def _pagina_cargues_activos(trabajos):
-    tarjetas = []
-    for trabajo in trabajos:
-        cursos = trabajo.get("cursos") or []
-        if cursos:
-            curso = cursos[0].get("curso") or "Curso sin nombre"
-            programa = cursos[0].get("programa") or "Programa sin nombre"
-            if len(cursos) > 1:
-                curso = f"{curso} y {len(cursos) - 1} curso(s) más"
-        else:
-            curso, programa = "Curso en proceso", "Programa sin nombre"
-        total = int(trabajo.get("total") or 0)
-        procesadas = int(trabajo.get("procesadas") or 0)
-        exitosas = int(trabajo.get("exitosas") or 0)
-        errores = int(trabajo.get("errores") or 0)
-        porcentaje = max(0, min(100, round((procesadas / total) * 100) if total > 0 else 0))
-        trabajo_id = html.escape(str(trabajo.get("id") or ""))
-        en_cola = trabajo.get("etapa") == "en_cola"
-        posicion = _posicion_en_cola(str(trabajo.get("id") or "")) if en_cola else None
-        estado_texto = f"En cola · #{posicion}" if posicion else "En progreso"
-        inicio_label = "En cola desde" if en_cola else "Iniciado"
-        fecha_mostrar = trabajo.get("encolado_en") if en_cola else trabajo.get("iniciado_en")
-        tarjetas.append(f'''<article class="carga-card"><div class="curso-bloque"><div class="curso-icono">▣</div><div class="curso-texto"><h2>{html.escape(curso)}</h2><p>Programa: {html.escape(programa)}</p><span class="estado-chip"><span></span> {html.escape(estado_texto)}</span></div></div><div class="inicio-bloque"><small>◷ {inicio_label}</small><strong>{html.escape(_formatear_inicio_cargue(fecha_mostrar))}</strong></div><div class="avance-bloque"><div class="avance-cab"><span>Progreso general</span><strong>{porcentaje}%</strong></div><div class="barra"><div class="barra-interna" style="width:{porcentaje}%"></div></div><div class="metricas"><div><i class="verde"></i><small>Procesadas</small><strong>{procesadas}</strong></div><div><i class="verde"></i><small>Exitosas</small><strong>{exitosas}</strong></div><div><i class="rojo"></i><small>Errores</small><strong>{errores}</strong></div></div></div><div class="accion-bloque"><a href="/proceso/{trabajo_id}">Entrar al proceso <b>›</b></a><form action="/cancelar/{trabajo_id}" method="post" style="margin-top:8px"><button type="submit" style="border:1px solid #fecaca;background:#fff;color:#b42318;border-radius:8px;padding:8px 10px;cursor:pointer;font-weight:700">Cancelar</button></form></div></article>''')
+def _render_tarjeta_cargue(trabajo, usuario_actual):
+    cursos = trabajo.get("cursos") or []
+    if cursos:
+        curso = cursos[0].get("curso") or "Curso sin nombre"
+        programa = cursos[0].get("programa") or "Programa sin nombre"
+        if len(cursos) > 1:
+            curso = f"{curso} y {len(cursos) - 1} curso(s) más"
+    else:
+        curso, programa = "Curso en proceso", "Programa sin nombre"
+
+    total = int(trabajo.get("total") or 0)
+    procesadas = int(trabajo.get("procesadas") or 0)
+    exitosas = int(trabajo.get("exitosas") or 0)
+    errores = int(trabajo.get("errores") or 0)
+    porcentaje = max(
+        0,
+        min(100, round((procesadas / total) * 100) if total > 0 else 0),
+    )
+    trabajo_id_raw = str(trabajo.get("id") or "")
+    trabajo_id = html.escape(trabajo_id_raw)
+    en_cola = trabajo.get("etapa") == "en_cola"
+    posicion = _posicion_en_cola(trabajo_id_raw) if en_cola else None
+    estado_texto = f"En cola · #{posicion}" if posicion else "En progreso"
+    inicio_label = "En cola desde" if en_cola else "Iniciado"
+    fecha_mostrar = trabajo.get("encolado_en") if en_cola else trabajo.get("iniciado_en")
+    propietario = str(trabajo.get("usuario_app") or "")
+    propietario_visible = _nombre_visible(propietario) or propietario or "Usuario"
+    es_propietario = _es_de(trabajo, usuario_actual)
+
+    if es_propietario:
+        acciones = (
+            f'<a href="/proceso/{trabajo_id}">Entrar al proceso <b>&rsaquo;</b></a>'
+            f'<form action="/cancelar/{trabajo_id}" method="post" style="margin-top:8px">'
+            '<button type="submit" style="border:1px solid #fecaca;background:#fff;color:#b42318;'
+            'border-radius:8px;padding:8px 10px;cursor:pointer;font-weight:700">Cancelar</button></form>'
+        )
+    else:
+        acciones = (
+            '<span class="solo-lectura" style="display:block;border:1px solid #e5e7ef;'
+            'background:#f9fafb;color:#667085;border-radius:10px;padding:11px 12px;'
+            'font-size:11px;font-weight:700;">Cargue de otro usuario</span>'
+        )
+
+    return (
+        f'<article class="carga-card">'
+        f'<div class="curso-bloque"><div class="curso-icono">▣</div><div class="curso-texto">'
+        f'<h2>{html.escape(curso)}</h2><p>Programa: {html.escape(programa)}</p>'
+        f'<p style="margin-top:-4px;">Iniciado por: <strong>{html.escape(propietario_visible)}</strong></p>'
+        f'<span class="estado-chip"><span></span> {html.escape(estado_texto)}</span></div></div>'
+        f'<div class="inicio-bloque"><small>◷ {inicio_label}</small>'
+        f'<strong>{html.escape(_formatear_inicio_cargue(fecha_mostrar))}</strong></div>'
+        f'<div class="avance-bloque"><div class="avance-cab"><span>Progreso general</span>'
+        f'<strong>{porcentaje}%</strong></div><div class="barra"><div class="barra-interna" '
+        f'style="width:{porcentaje}%"></div></div><div class="metricas">'
+        f'<div><i class="verde"></i><small>Procesadas</small><strong>{procesadas}</strong></div>'
+        f'<div><i class="verde"></i><small>Exitosas</small><strong>{exitosas}</strong></div>'
+        f'<div><i class="rojo"></i><small>Errores</small><strong>{errores}</strong></div></div></div>'
+        f'<div class="accion-bloque">{acciones}</div></article>'
+    )
+
+
+def _pagina_cargues_activos(trabajos, usuario_actual=None):
+    if usuario_actual is None:
+        usuario_actual = _usuario_actual()
+    tarjetas = [
+        _render_tarjeta_cargue(trabajo, usuario_actual)
+        for trabajo in trabajos
+    ]
     cuerpo = "".join(tarjetas)
     cantidad = len(trabajos)
     plural = "s" if cantidad != 1 else ""
@@ -5593,13 +5704,12 @@ def cargue_actual():
     activos = [
         trabajo for trabajo in TRABAJOS.values()
         if not trabajo.get("terminado")
-        and _es_de(trabajo, usuario)
         and trabajo.get("etapa") in {"en_cola", "iniciando", "login", "preparando", "procesando", "validando_login"}
     ]
     activos.sort(key=lambda item: item.get("encolado_en") or item.get("iniciado_en") or item.get("creado_en", ""))
     if not activos:
         return _pagina_sin_cargue_actual()
-    return _pagina_cargues_activos(activos)
+    return _pagina_cargues_activos(activos, usuario)
 
 
 @app.post("/cancelar/{trabajo_id}", response_class=HTMLResponse)
