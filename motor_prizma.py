@@ -4707,6 +4707,41 @@ def _registrar_respuesta_prizma(response, respuestas, captura):
 
 
 # ============================================================
+# SELECCION DE ACTIVIDADES POST-ANALISIS
+# ============================================================
+
+
+def filtrar_actividades_seleccionadas(actividades, seleccion_actividades=None):
+    """Devuelve solo las actividades elegidas por hoja + fila.
+
+    ``None`` conserva el comportamiento historico y procesa todas. Una lista
+    vacia significa que el usuario no eligio ninguna actividad.
+    """
+    if seleccion_actividades is None:
+        return list(actividades or [])
+
+    claves = set()
+    for item in seleccion_actividades or []:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        hoja = str(item[0] or "")
+        try:
+            fila = int(item[1])
+        except (TypeError, ValueError):
+            continue
+        claves.add((hoja, fila))
+
+    return [
+        actividad
+        for actividad in (actividades or [])
+        if (
+            str(actividad.get("hoja") or ""),
+            int(actividad.get("fila_excel") or 0),
+        ) in claves
+    ]
+
+
+# ============================================================
 # MOTOR COMPLETO
 # ============================================================
 
@@ -4744,6 +4779,7 @@ def ejecutar_cargue(
     usuario_prizma,
     contrasena_prizma,
     estado,
+    seleccion_actividades=None,
 ):
     navegador = None
 
@@ -4777,11 +4813,19 @@ def ejecutar_cargue(
             procesar_retos,
         )
 
+        actividades = filtrar_actividades_seleccionadas(
+            actividades,
+            seleccion_actividades,
+        )
+
         if not actividades:
             actualizar_estado(
                 estado,
                 etapa="error",
-                mensaje="No se encontraron actividades OVI/OVA/Retos compatibles.",
+                mensaje=(
+                    "No se encontraron actividades seleccionadas para cargar "
+                    "en PRIZMA."
+                ),
                 terminado=True,
             )
             return
