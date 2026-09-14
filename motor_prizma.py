@@ -184,6 +184,28 @@ def normalizar_categoria(categoria):
 # VARIANTES SEGURAS DE PROGRAMA
 # ============================================================
 
+# Equivalencias academicas explicitas observadas en PRIZMA.
+# Cada grupo representa nombres distintos que pertenecen a la misma
+# linea/programa para efectos de localizar una actividad.
+#
+# IMPORTANTE: evitar fuzzy matching general. Para agregar un caso nuevo,
+# agregarlo explicitamente al grupo correcto o crear uno nuevo.
+EQUIVALENCIAS_PROGRAMAS = (
+    {
+        "administracion de empresas",
+        "tecnologia en gestion empresarial",
+    },
+    {
+        "administracion turistica y hotelera",
+        "tecnologia en gestion turistica y hoteles",
+    },
+    {
+        "contaduria publica",
+        "tecnica profesional en procesos contables",
+    },
+)
+
+
 def obtener_variantes_programa(
     programa,
 ):
@@ -198,6 +220,14 @@ def obtener_variantes_programa(
     variantes = {
         programa_n
     }
+
+    # Si el nombre pertenece a un grupo de equivalencias conocido,
+    # aceptamos todos los nombres de ese mismo grupo. La relacion es
+    # deliberadamente explicita y bidireccional.
+    for grupo in EQUIVALENCIAS_PROGRAMAS:
+        if programa_n in grupo:
+            variantes.update(grupo)
+            break
 
     partes = programa_n.split()
 
@@ -2132,9 +2162,10 @@ def analizar_resultados_pagina(
             "categoria_prizma"
         ] == "OVA":
 
-            cumple_categoria = (
-                "ova" in texto_n
-            )
+            # En OVA la fila puede no mostrar literalmente la categoría
+            # dentro de su texto. La categoría ya quedó validada al
+            # entrar explícitamente a la pestaña OVA.
+            cumple_categoria = True
 
         elif actividad[
             "categoria_prizma"

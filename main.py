@@ -67,7 +67,7 @@ from zoneinfo import ZoneInfo
 
 
 app = FastAPI(
-    title="Auto Prizma Pro"
+    title="Cargue Prizma Pro"
 )
 
 
@@ -4186,7 +4186,7 @@ def generar_html(
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Auto Prizma Pro</title>
+        <title>Cargue Prizma Pro</title>
         <link rel="icon" type="image/png" href="/auto-prizma-logo.png">
         <style>
             :root {
@@ -4597,12 +4597,12 @@ def generar_html(
         <div class="app">
             <aside class="sidebar">
                 <div class="marca">
-                    <div class="logo" aria-label="Auto Prizma Pro">
-                        <img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Auto Prizma Pro">
+                    <div class="logo" aria-label="Cargue Prizma Pro">
+                        <img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro">
                     </div>
                     <div>
-                        <strong>Auto Prizma Pro</strong>
-                        <span>Automatización PRIZMA</span>
+                        <strong>Cargue Prizma Pro</strong>
+                        <span>Cargue Prizma</span>
                     </div>
                 </div>
 
@@ -4968,6 +4968,8 @@ img, svg, video { max-width: 100%; height: auto; }
   .sidebar .nav-item { padding: 9px 11px !important; font-size: 12px !important; }
 }
 
+.logo-imagen { width:100% !important; height:100% !important; object-fit:contain !important; display:block !important; }
+
 /* ---------- tema oscuro ---------- */
 html[data-theme="dark"] {
   color-scheme: dark;
@@ -5095,6 +5097,37 @@ html[data-theme="dark"] .numero-seccion {
   color: #c4b5fd !important;
 }
 
+
+/* Cargue en progreso: evitar fondos claros con texto claro en modo oscuro. */
+html[data-theme="dark"] .lista-actividades,
+html[data-theme="dark"] .actividad-progreso,
+html[data-theme="dark"] .estado-panel .estado-caja {
+  background: #111827 !important;
+  color: #e5e7eb !important;
+  border-color: #263244 !important;
+}
+html[data-theme="dark"] .actividad-progreso {
+  border-bottom-color: #263244 !important;
+}
+html[data-theme="dark"] .actividad-progreso.actividad-procesando {
+  background: #1d1b36 !important;
+  box-shadow: inset 3px 0 0 #7c6ff0 !important;
+}
+html[data-theme="dark"] .actividad-progreso.actividad-ok {
+  background: #10251d !important;
+}
+html[data-theme="dark"] .actividad-progreso.actividad-error-fila {
+  background: #2a1719 !important;
+}
+html[data-theme="dark"] .actividad-nombre,
+html[data-theme="dark"] .estado-caja strong,
+html[data-theme="dark"] .leyenda div {
+  color: #e5e7eb !important;
+}
+html[data-theme="dark"] .estado-caja span {
+  color: #aeb9ca !important;
+}
+
 .tema-toggle {
   position: fixed;
   top: 16px;
@@ -5217,7 +5250,7 @@ def _pagina_login(error="", usuario_previo=""):
     plantilla = r"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ingresar - Auto Prizma Pro</title>
+<title>Ingresar - Cargue Prizma Pro</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#f7f8fc;
@@ -5245,8 +5278,8 @@ border-radius:10px;font-size:13px;margin-bottom:18px}
 </style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body>
 <form class="caja" method="post" action="/login">
   <div class="marca">
-    <div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div>
-    <div><strong>Auto Prizma Pro</strong><span>Automatizacion PRIZMA</span></div>
+    <div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div>
+    <div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div>
   </div>
   <h1>Ingresar</h1>
   <p class="sub">Usa el usuario que te entregaron.</p>
@@ -5386,7 +5419,7 @@ def cambiar_clave_formulario(mensaje: str = "", error: str = ""):
     plantilla = r"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cambiar contrasena - Auto Prizma Pro</title>
+<title>Cambiar contrasena - Cargue Prizma Pro</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fc;color:#101828;
@@ -5932,7 +5965,7 @@ def iniciar_trabajo(
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Cargue en progreso - Auto Prizma Pro</title>
+        <title>Cargue en progreso - Cargue Prizma Pro</title>
         <style>
             :root {
                 --fondo:#f7f8fc; --panel:#fff; --texto:#101828; --muted:#667085;
@@ -6006,13 +6039,8 @@ def iniciar_trabajo(
         <div class="app">
             <aside class="sidebar">
                 <div class="marca">
-                    <div class="logo" aria-label="Auto Prizma Pro">
-                        <svg viewBox="0 0 48 48" aria-hidden="true">
-                            <path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/>
-                            <path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/>
-                        </svg>
-                    </div>
-                    <div><strong>Auto Prizma Pro</strong><span>Cargue automático</span></div>
+                    <div class="logo" aria-label="Cargue Prizma Pro"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div>
+                    <div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div>
                 </div>
                 <nav class="nav">
                     <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
@@ -6205,10 +6233,10 @@ def iniciar_trabajo(
 
 def _pagina_sin_cargue_actual():
     return HTMLResponse(r'''<!DOCTYPE html>
-<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Auto Prizma Pro</title>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Cargue Prizma Pro</title>
 <style>
 :root{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 12px 34px rgba(29,41,57,.06)}*{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}.app{min-height:100vh;display:grid;grid-template-columns:235px 1fr}.sidebar{height:100vh;background:#fff;border-right:1px solid var(--borde);padding:28px 20px;display:flex;flex-direction:column}.marca{display:flex;align-items:center;gap:12px;margin-bottom:34px}.logo{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#6d5dfc,#4338ca);box-shadow:0 8px 20px rgba(79,70,229,.25)}.logo svg{width:29px;height:29px}.logo svg path:first-child{fill:#fff}.logo svg path:last-child{fill:#c7d2fe}.marca strong{display:block;font-size:18px}.marca span{display:block;color:var(--muted);font-size:12px;margin-top:3px}.nav{display:grid;gap:8px}.nav-item{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;display:flex;gap:11px;align-items:center;text-decoration:none}.nav-item:hover{background:#f7f5ff;color:#4f46e5}.nav-item.activo{background:#f1efff;color:#4f46e5;font-weight:700}.estado-servicio{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}.servicio-linea{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}.punto{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}.servicio-mini{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}.chip{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}.contenido{padding:30px 34px;display:grid;place-items:center}.vacio{width:min(680px,100%);background:#fff;border:1px solid var(--borde);border-radius:18px;box-shadow:var(--sombra);padding:54px 34px;text-align:center}.icono{width:68px;height:68px;border-radius:20px;background:#f1efff;color:#5548e8;display:grid;place-items:center;margin:0 auto 20px;font-size:28px;font-weight:800}.vacio h1{margin:0 0 10px;font-size:27px}.vacio p{margin:0 auto 24px;color:var(--muted);font-size:14px;line-height:1.6;max-width:480px}.boton{display:inline-flex;padding:12px 18px;border-radius:10px;background:linear-gradient(90deg,#5548e8,#6546e8);color:#fff;text-decoration:none;font-size:13px;font-weight:800}@media(max-width:900px){.app{grid-template-columns:1fr}.sidebar{display:none}.contenido{padding:18px}}
-</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="vacio"><div class="icono">⇧</div><h1>No hay cargues activos</h1><p>Cuando alguien inicie un proceso desde Inicio, aparecerá aquí para que el equipo pueda consultar su progreso.</p><a class="boton" href="/">Iniciar un nuevo cargue</a></section></main></div></body></html>''')
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div><div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="vacio"><div class="icono">⇧</div><h1>No hay cargues activos</h1><p>Cuando alguien inicie un proceso desde Inicio, aparecerá aquí para que el equipo pueda consultar su progreso.</p><a class="boton" href="/">Iniciar un nuevo cargue</a></section></main></div></body></html>''')
 
 
 def _formatear_inicio_cargue(fecha_iso):
@@ -6296,9 +6324,9 @@ def _pagina_cargues_activos(trabajos, usuario_actual=None):
     cuerpo = "".join(tarjetas)
     cantidad = len(trabajos)
     plural = "s" if cantidad != 1 else ""
-    return HTMLResponse(f'''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Auto Prizma Pro</title><style>
+    return HTMLResponse(f'''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Cargue Prizma Pro</title><style>
 :root{{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 10px 30px rgba(29,41,57,.05)}}*{{box-sizing:border-box}}body{{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}}.app{{min-height:100vh;display:grid;grid-template-columns:235px 1fr}}.sidebar{{position:sticky;top:0;height:100vh;background:#fff;border-right:1px solid var(--borde);padding:28px 20px;display:flex;flex-direction:column}}.marca{{display:flex;align-items:center;gap:12px;margin-bottom:34px}}.logo{{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#6d5dfc,#4338ca);box-shadow:0 8px 20px rgba(79,70,229,.25)}}.logo svg{{width:29px;height:29px}}.logo svg path:first-child{{fill:#fff}}.logo svg path:last-child{{fill:#c7d2fe}}.marca strong{{display:block;font-size:18px}}.marca span{{display:block;color:var(--muted);font-size:12px;margin-top:3px}}.nav{{display:grid;gap:8px}}.nav-item{{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;display:flex;gap:11px;align-items:center;text-decoration:none}}.nav-item:hover{{background:#f7f5ff;color:#4f46e5}}.nav-item.activo{{background:#f1efff;color:#4f46e5;font-weight:700}}.estado-servicio{{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}}.servicio-linea{{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}}.punto{{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}}.servicio-mini{{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}}.chip{{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}}.contenido{{padding:34px 36px 44px;min-width:0}}.cabecera-top{{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:24px}}.cabecera h1{{font-size:29px;margin:0 0 7px}}.cabecera p{{margin:0;color:var(--muted);font-size:14px;line-height:1.5}}.contador{{background:#f1efff;color:#5548e8;border-radius:999px;padding:8px 12px;font-size:12px;font-weight:800;white-space:nowrap}}.lista{{display:grid;gap:16px}}.carga-card{{background:#fff;border:1px solid var(--borde);border-radius:17px;box-shadow:var(--sombra);padding:22px;display:grid;grid-template-columns:minmax(245px,1.15fr) 170px minmax(320px,1.25fr) 185px;gap:22px;align-items:center}}.curso-bloque{{display:flex;gap:14px;align-items:center;min-width:0}}.curso-icono{{width:58px;height:58px;border-radius:15px;background:#f1efff;color:#5548e8;display:grid;place-items:center;font-size:24px;flex:0 0 58px}}.curso-texto{{min-width:0}}.curso-texto h2{{font-size:16px;margin:0 0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.curso-texto p{{font-size:12px;color:var(--muted);margin:0 0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.estado-chip{{display:inline-flex;align-items:center;gap:6px;background:#eef6ff;color:#1473e6;border-radius:999px;padding:5px 9px;font-size:11px;font-weight:800}}.estado-chip span{{width:6px;height:6px;background:#2e90fa;border-radius:50%}}.inicio-bloque small{{display:block;color:var(--muted);font-size:11px;margin-bottom:7px}}.inicio-bloque strong{{font-size:12px;color:#475467}}.avance-cab{{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:var(--muted);font-size:11px}}.avance-cab strong{{font-size:21px;color:#5548e8}}.barra{{height:10px;border-radius:999px;background:#eeecff;overflow:hidden}}.barra-interna{{height:100%;background:linear-gradient(90deg,#6759f5,#4f46e5);border-radius:999px}}.metricas{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}}.metricas div{{display:grid;grid-template-columns:8px 1fr;column-gap:5px;align-items:center}}.metricas i{{width:7px;height:7px;border-radius:50%}}.metricas i.verde{{background:#12b76a}}.metricas i.rojo{{background:#ef4444}}.metricas small{{font-size:10px;color:var(--muted)}}.metricas strong{{grid-column:2;font-size:14px;margin-top:2px}}.accion-bloque{{border-left:1px solid var(--borde);padding-left:20px;text-align:center}}.accion-bloque a{{display:flex;justify-content:center;align-items:center;gap:8px;background:linear-gradient(90deg,#5548e8,#6546e8);color:#fff;text-decoration:none;font-size:12px;font-weight:800;border-radius:10px;padding:12px 13px}}.accion-bloque b{{font-size:18px}}.accion-bloque small{{display:block;color:var(--muted);font-size:10px;margin-top:8px}}.nota{{margin-top:18px;border:1px solid #ddd8ff;background:#faf9ff;border-radius:14px;padding:14px 17px;color:#475467;font-size:12px}}@media(max-width:1200px){{.carga-card{{grid-template-columns:1fr 1fr}}.accion-bloque{{border-left:0;padding-left:0}}}}@media(max-width:900px){{.app{{grid-template-columns:1fr}}.sidebar{{display:none}}.contenido{{padding:20px}}.carga-card{{grid-template-columns:1fr}}}}
-</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="cabecera"><div class="cabecera-top"><div><h1>Cargue actual</h1><p>Aquí puedes ver todos los cursos que están siendo procesados actualmente.<br>Entra a un proceso para revisar el detalle de sus actividades.</p></div><div class="contador">{cantidad} proceso{plural} activo{plural}</div></div></section><section class="lista">{cuerpo}</section><div class="nota"><strong>Vista global del equipo.</strong> Cada tarjeta representa un cargue activo. Para ver la lista detallada de actividades, entra al proceso correspondiente.</div></main></div><script>setTimeout(function(){{window.location.reload();}},3000);</script></body></html>''')
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div><div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="cabecera"><div class="cabecera-top"><div><h1>Cargue actual</h1><p>Aquí puedes ver todos los cursos que están siendo procesados actualmente.<br>Entra a un proceso para revisar el detalle de sus actividades.</p></div><div class="contador">{cantidad} proceso{plural} activo{plural}</div></div></section><section class="lista">{cuerpo}</section><div class="nota"><strong>Vista global del equipo.</strong> Cada tarjeta representa un cargue activo. Para ver la lista detallada de actividades, entra al proceso correspondiente.</div></main></div><script>setTimeout(function(){{window.location.reload();}},3000);</script></body></html>''')
 
 
 @app.get("/cargue-actual", response_class=HTMLResponse)
@@ -6547,7 +6575,7 @@ def _pagina_registros(tipo="historial"):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>__TITULO__ - Auto Prizma Pro</title>
+    <title>__TITULO__ - Cargue Prizma Pro</title>
     <style>
         :root{--fondo:#f7f8fc;--panel:#fff;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 12px 34px rgba(29,41,57,.06)}
         *{box-sizing:border-box} body{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}
@@ -6565,7 +6593,7 @@ def _pagina_registros(tipo="historial"):
 <body>
 <div class="app">
     <aside class="sidebar">
-        <div class="marca"><div class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div>
+        <div class="marca"><div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div><div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div></div>
         <nav class="nav">
             <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
             <a class="nav-item" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
@@ -6728,7 +6756,7 @@ def _pagina_reporte_html(titulo, subtitulo, ruta_csv, url_descarga):
     return f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{e(titulo)} - Auto Prizma Pro</title>
+<title>{e(titulo)} - Cargue Prizma Pro</title>
 <style>
 :root{{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef}}
 *{{box-sizing:border-box}}
@@ -6767,8 +6795,8 @@ tbody tr:hover{{background:#fafaff}}
 <body><div class="app">
 <aside class="sidebar">
   <div class="marca">
-    <div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div>
-    <div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div>
+    <div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div>
+    <div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div>
   </div>
   <nav class="nav">
     <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
