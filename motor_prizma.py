@@ -203,6 +203,11 @@ EQUIVALENCIAS_PROGRAMAS = (
         "contaduria publica",
         "tecnica profesional en procesos contables",
     },
+    {
+        "negocios internacionales",
+        "tecnica virtual profesional en procesos logisticos y de comercio exterior",
+        "tecnica vistural profesional en procesos logisticos y de comercio exterior",
+    },
 )
 
 
