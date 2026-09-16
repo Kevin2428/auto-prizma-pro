@@ -305,7 +305,7 @@ def limpiar_prefijo_tecnico_recurso(
     )
 
     nombre_n = re.sub(
-        r"^u\d+\s+t\d+\s+",
+        r"^u\d+\s*t\d+\s+",
         "",
         nombre_n,
     )
