@@ -1,6 +1,7 @@
 fastapi[standard]
 openpyxl
 python-multipart
+python-docx
 playwright==1.61.0
 tzdata
 google-auth==2.57.0
