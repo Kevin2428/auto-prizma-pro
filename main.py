@@ -67,7 +67,7 @@ from zoneinfo import ZoneInfo
 
 
 app = FastAPI(
-    title="Auto Prizma Pro"
+    title="Cargue Prizma Pro"
 )
 
 
@@ -2648,20 +2648,79 @@ COLA_CARGUES = deque()
 COLA_CONDICION = threading.Condition(TRABAJOS_LOCK)
 
 # Cuantos cargues pueden correr al mismo tiempo.
-# 0 = sin limite: cada cargue arranca en su propio hilo apenas se pide,
-# sin importar cuantos haya corriendo ya.
-# Cada cargue abre su propio Chromium, asi que si la maquina se queda
-# sin RAM se puede poner un tope con la variable de entorno
-# AUTO_PRIZMA_MAX_SIMULTANEOS.
-try:
-    MAX_CARGUES_SIMULTANEOS = int(
-        os.environ.get("AUTO_PRIZMA_MAX_SIMULTANEOS") or 0
-    )
-except ValueError:
-    MAX_CARGUES_SIMULTANEOS = 0
+# Seguridad operativa: nunca se permiten mas de 2 Chromium de cargue a la vez.
+# AUTO_PRIZMA_MAX_SIMULTANEOS puede bajarlo a 1, pero 0/invalidos/>2 vuelven a 2.
+def _resolver_max_cargues_simultaneos(valor):
+    try:
+        limite = int(valor)
+    except (TypeError, ValueError):
+        return 2
+
+    if limite == 1:
+        return 1
+
+    return 2
+
+
+MAX_CARGUES_SIMULTANEOS = _resolver_max_cargues_simultaneos(
+    os.environ.get("AUTO_PRIZMA_MAX_SIMULTANEOS")
+)
 
 CARGUES_ACTIVOS = 0
 ZONA_HORARIA_COLOMBIA = ZoneInfo("America/Bogota")
+
+
+def _codificar_clave_actividad(hoja, fila):
+    return json.dumps(
+        [str(hoja or ""), int(fila or 0)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _parsear_clave_actividad(valor):
+    try:
+        datos = json.loads(str(valor or ""))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(datos, list) or len(datos) != 2:
+        return None
+
+    hoja = str(datos[0] or "")
+    try:
+        fila = int(datos[1])
+    except (TypeError, ValueError):
+        return None
+
+    if not hoja or fila <= 0:
+        return None
+
+    return hoja, fila
+
+
+def _validar_seleccion_actividades(valores, resultado):
+    permitidas = set()
+    for hoja in (resultado or {}).get("hojas", []) or []:
+        nombre_hoja = str(hoja.get("hoja") or "")
+        for actividad in hoja.get("actividades", []) or []:
+            try:
+                fila = int(actividad.get("fila") or 0)
+            except (TypeError, ValueError):
+                continue
+            if nombre_hoja and fila > 0:
+                permitidas.add((nombre_hoja, fila))
+
+    seleccion = []
+    vistas = set()
+    for valor in valores or []:
+        clave = _parsear_clave_actividad(valor)
+        if clave is None or clave not in permitidas or clave in vistas:
+            continue
+        vistas.add(clave)
+        seleccion.append([clave[0], clave[1]])
+
+    return seleccion
 
 
 def _ahora_colombia():
@@ -2791,6 +2850,7 @@ def ejecutar_cargue_con_historial(
             usuario_prizma,
             contrasena_prizma,
             trabajo,
+            trabajo.get("seleccion_actividades"),
         )
     finally:
         try:
@@ -2834,15 +2894,13 @@ def _encolar_trabajo(trabajo_id, usuario_prizma, contrasena_prizma):
         if trabajo_id not in COLA_CARGUES:
             COLA_CARGUES.append(trabajo_id)
 
-        # Con MAX_CARGUES_SIMULTANEOS = 0 esto arranca de inmediato:
-        # nadie espera a que otro usuario termine.
+        # Despacha solo si hay uno de los dos cupos globales disponible.
+        # Si ambos estan ocupados, el trabajo conserva su posicion FIFO.
         _despachar_cargues_pendientes()
 
 
 def _hay_capacidad():
     """Debe llamarse con COLA_CONDICION tomado."""
-    if MAX_CARGUES_SIMULTANEOS <= 0:
-        return True
     return CARGUES_ACTIVOS < MAX_CARGUES_SIMULTANEOS
 
 
@@ -3023,8 +3081,7 @@ def _ejecutar_cargue_en_hilo(trabajo_id):
 
 print(
     "Cargues simultaneos:",
-    "sin limite" if MAX_CARGUES_SIMULTANEOS <= 0
-    else MAX_CARGUES_SIMULTANEOS,
+    MAX_CARGUES_SIMULTANEOS,
 )
 
 
@@ -3531,6 +3588,12 @@ def analizar_excel(
 
                     "tipo":
                         tipo_archivo,
+
+                    "tipo_recurso": (
+                        str(tipo_recurso).strip()
+                        if tipo_recurso
+                        else tipo_archivo
+                    ),
                 }
             )
 
@@ -3632,6 +3695,7 @@ def generar_html(
     resultado=None,
     error=None,
     trabajo_id=None,
+    seleccion_actual=None,
 ):
 
     def e(valor):
@@ -3981,6 +4045,19 @@ def generar_html(
         total_h5p = 0
         total_pdf = 0
         filas_html = ""
+        tipos_recurso_conteo = {}
+        tipos_recurso_seleccionados = {}
+
+        seleccion_actual_claves = None
+        if seleccion_actual is not None:
+            seleccion_actual_claves = set()
+            for item in seleccion_actual or []:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    continue
+                try:
+                    seleccion_actual_claves.add((str(item[0] or ""), int(item[1])))
+                except (TypeError, ValueError):
+                    continue
 
         origen_matriz = str(resultado.get("origen_matriz") or "link").strip().lower()
         nombre_matriz = str(resultado.get("nombre_matriz") or "").strip()
@@ -4007,6 +4084,30 @@ def generar_html(
             total_pdf += hoja.get("pdf", 0)
 
             for actividad in hoja["actividades"]:
+
+                tipo_recurso = str(
+                    actividad.get("tipo_recurso")
+                    or actividad.get("tipo")
+                    or "Sin tipo"
+                ).strip()
+                tipos_recurso_conteo[tipo_recurso] = (
+                    tipos_recurso_conteo.get(tipo_recurso, 0) + 1
+                )
+
+                clave_tuple = (
+                    str(hoja.get("hoja") or ""),
+                    int(actividad.get("fila") or 0),
+                )
+                seleccionada = (
+                    seleccion_actual_claves is None
+                    or clave_tuple in seleccion_actual_claves
+                )
+                if seleccionada:
+                    tipos_recurso_seleccionados[tipo_recurso] = (
+                        tipos_recurso_seleccionados.get(tipo_recurso, 0) + 1
+                    )
+
+                clave_actividad = _codificar_clave_actividad(*clave_tuple)
 
                 categoria = actividad["categoria"]
                 clase_categoria = {
@@ -4053,10 +4154,23 @@ def generar_html(
 
                 filas_html += f"""
                 <tr>
+                    <td class="celda-seleccion">
+                        <input
+                            type="checkbox"
+                            class="actividad-seleccion"
+                            name="actividades_seleccionadas"
+                            value="{e(clave_actividad)}"
+                            data-tipo-recurso="{e(tipo_recurso)}"
+                            form="form-iniciar-cargue"
+                            {"checked" if seleccionada else ""}
+                            aria-label="Seleccionar {e(actividad["nombre"])}"
+                        >
+                    </td>
                     <td>{e(actividad["semana"])}</td>
                     <td>{e(actividad["unidad"])}</td>
                     <td class="celda-actividad">{e(actividad["nombre"])}</td>
                     <td><span class="badge {clase_categoria}">{e(etiqueta_categoria)}</span></td>
+                    <td><span class="badge badge-recurso">{e(tipo_recurso)}</span></td>
                     <td><span class="badge {clase_tipo}">{e(actividad["tipo"])}</span></td>
                     <td class="celda-actividad" title="{e(archivo_drive)}">
                         <strong>{e(archivo_drive)}</strong>
@@ -4065,6 +4179,27 @@ def generar_html(
                     <td><span class="badge {'badge-verde' if coincide_zip else 'badge-gris'}">{e(estado_zip)}</span></td>
                 </tr>
                 """
+
+        total_seleccionadas = sum(tipos_recurso_seleccionados.values())
+        filtros_tipo_html = ""
+        for tipo_recurso, cantidad in tipos_recurso_conteo.items():
+            seleccionadas_tipo = tipos_recurso_seleccionados.get(tipo_recurso, 0)
+            marcado = seleccionadas_tipo == cantidad and cantidad > 0
+            filtros_tipo_html += f"""
+            <label class="filtro-recurso-item">
+                <input
+                    type="checkbox"
+                    class="filtro-tipo-recurso"
+                    data-tipo-recurso="{e(tipo_recurso)}"
+                    {"checked" if marcado else ""}
+                >
+                <span class="filtro-recurso-check">✓</span>
+                <span class="filtro-recurso-texto">
+                    <strong>{e(tipo_recurso)}</strong>
+                    <small>{cantidad} actividad{"es" if cantidad != 1 else ""}</small>
+                </span>
+            </label>
+            """
 
         bloque_advertencias_revision = ""
         if advertencias_drive:
@@ -4228,6 +4363,28 @@ def generar_html(
         {bloque_advertencias_revision}
         {bloque_error_revision}
 
+        <section class="panel selector-recursos-panel">
+            <div class="selector-recursos-cabecera">
+                <div class="titulo-bloque">
+                    <h2>Selecciona qué se cargará</h2>
+                    <p>Marca tipos completos para seleccionar rápido y ajusta actividades individuales en la tabla.</p>
+                </div>
+                <div class="selector-recursos-contador">
+                    <strong id="contador-seleccionadas">{total_seleccionadas} de {total_actividades}</strong>
+                    <span>actividades seleccionadas</span>
+                </div>
+            </div>
+
+            <div class="filtros-recursos">
+                {filtros_tipo_html}
+            </div>
+
+            <div class="selector-recursos-acciones">
+                <button type="button" id="seleccionar-todas-actividades">Seleccionar todo</button>
+                <button type="button" id="limpiar-seleccion-actividades">Limpiar selección</button>
+            </div>
+        </section>
+
         <section class="revision-grid">
             <div class="panel tabla-panel">
                 <div class="titulo-bloque">
@@ -4239,11 +4396,13 @@ def generar_html(
                     <table>
                         <thead>
                             <tr>
+                                <th>✓</th>
                                 <th>Semana</th>
                                 <th>Unidad</th>
                                 <th>Actividad</th>
                                 <th>Categoría</th>
-                                <th>Tipo</th>
+                                <th>Tipo de recurso</th>
+                                <th>Formato</th>
                                 <th>{e(encabezado_recurso)}</th>
                                 <th>{e(encabezado_estado)}</th>
                             </tr>
@@ -4261,7 +4420,7 @@ def generar_html(
                     <p>Ingresa tus credenciales para autorizar este cargue.</p>
                 </div>
 
-                <form action="/iniciar/{trabajo_id}" method="post" autocomplete="off">
+                <form id="form-iniciar-cargue" action="/iniciar/{trabajo_id}" method="post" autocomplete="off">
                     <label class="campo-label" for="usuario_prizma">Usuario PRIZMA</label>
                     <div class="campo-moderno">
                         <span>♙</span>
@@ -4310,7 +4469,7 @@ def generar_html(
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Auto Prizma Pro</title>
+        <title>Cargue Prizma Pro</title>
         <link rel="icon" type="image/png" href="/auto-prizma-logo.png">
         <style>
             :root {
@@ -4640,6 +4799,29 @@ def generar_html(
             .resumen-card.morado strong, .resumen-card.violeta strong { color: #6d4ce8; }
             .resumen-card.rojo strong { color: #e5484d; }
 
+            .selector-recursos-panel { grid-column:1/-1; padding:24px; margin-bottom:20px; }
+            .selector-recursos-cabecera { display:flex; justify-content:space-between; gap:20px; align-items:flex-start; }
+            .selector-recursos-cabecera .titulo-bloque { margin-bottom:0; }
+            .selector-recursos-contador { text-align:right; min-width:170px; }
+            .selector-recursos-contador strong { display:block; font-size:18px; color:#4f46e5; }
+            .selector-recursos-contador span { display:block; margin-top:3px; color:var(--muted); font-size:11px; }
+            .filtros-recursos { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin-top:18px; }
+            .filtro-recurso-item { position:relative; display:flex; gap:10px; align-items:center; border:1px solid var(--borde); border-radius:12px; padding:12px; cursor:pointer; background:#fff; }
+            .filtro-recurso-item:hover { border-color:#b9b3f8; background:#fbfaff; }
+            .filtro-recurso-item input { position:absolute; opacity:0; pointer-events:none; }
+            .filtro-recurso-check { width:22px; height:22px; border-radius:6px; display:grid; place-items:center; background:#d0d5dd; color:#fff; font-size:12px; font-weight:900; flex:0 0 22px; }
+            .filtro-recurso-item:has(input:checked) { border-color:#9b8ff2; background:#faf9ff; }
+            .filtro-recurso-item:has(input:checked) .filtro-recurso-check { background:#5b48e8; }
+            .filtro-recurso-texto strong, .filtro-recurso-texto small { display:block; }
+            .filtro-recurso-texto strong { font-size:12px; color:#344054; }
+            .filtro-recurso-texto small { margin-top:3px; color:var(--muted); font-size:10px; }
+            .selector-recursos-acciones { display:flex; gap:8px; flex-wrap:wrap; margin-top:14px; }
+            .selector-recursos-acciones button { border:1px solid #d8d6f8; background:#fff; color:#4f46e5; border-radius:9px; padding:8px 11px; font-size:11px; font-weight:800; cursor:pointer; }
+            .selector-recursos-acciones button:hover { background:#f8f7ff; }
+            .celda-seleccion { width:48px; text-align:center; }
+            .actividad-seleccion { width:18px; height:18px; accent-color:#5b48e8; cursor:pointer; }
+            .badge-recurso { background:#eef4ff; color:#3538cd; white-space:nowrap; }
+
             .revision-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(310px, .75fr); gap: 20px; align-items: start; grid-column: 1 / -1; min-width: 0; }
             .tabla-panel, .credenciales-panel { padding: 24px; }
             .titulo-bloque { margin-bottom: 18px; }
@@ -4683,10 +4865,12 @@ def generar_html(
                 .google-conexion .google-boton { width: 100%; text-align: center; }
                 .grid-archivos, .grid-tipos { grid-template-columns: 1fr; }
                 .resumen-grid { grid-template-columns: repeat(2, 1fr); }
+                .selector-recursos-cabecera { flex-direction:column; }
+                .selector-recursos-contador { text-align:left; min-width:0; }
                 .contenido { padding: 14px; }
                 .panel-principal, .tabla-panel, .credenciales-panel { padding: 18px; }
             }
-        </style><link rel="stylesheet" href="/estilos-responsive.css">
+        </style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script>
     </head>
     <body>
         <div id="prizma-loader" class="prizma-loader" role="status" aria-live="polite" aria-hidden="true">
@@ -4699,12 +4883,12 @@ def generar_html(
         <div class="app">
             <aside class="sidebar">
                 <div class="marca">
-                    <div class="logo" aria-label="Auto Prizma Pro">
-                        <img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Auto Prizma Pro">
+                    <div class="logo" aria-label="Cargue Prizma Pro">
+                        <img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro">
                     </div>
                     <div>
-                        <strong>Auto Prizma Pro</strong>
-                        <span>Automatización PRIZMA</span>
+                        <strong>Cargue Prizma Pro</strong>
+                        <span>Cargue Prizma</span>
                     </div>
                 </div>
 
@@ -4756,8 +4940,69 @@ def generar_html(
             }
 
             const formularioInicio = document.querySelector('form[action^="/iniciar/"]');
+            const actividadesSeleccion = Array.from(document.querySelectorAll('.actividad-seleccion'));
+            const filtrosTipoRecurso = Array.from(document.querySelectorAll('.filtro-tipo-recurso'));
+            const contadorSeleccionadas = document.getElementById('contador-seleccionadas');
+            const botonSeleccionarTodas = document.getElementById('seleccionar-todas-actividades');
+            const botonLimpiarSeleccion = document.getElementById('limpiar-seleccion-actividades');
+
+            function actualizarEstadoSeleccion() {
+                const totalMarcadas = actividadesSeleccion.filter((item) => item.checked).length;
+                if (contadorSeleccionadas) {
+                    contadorSeleccionadas.textContent = totalMarcadas + ' de ' + actividadesSeleccion.length;
+                }
+
+                filtrosTipoRecurso.forEach((filtro) => {
+                    const tipo = filtro.dataset.tipoRecurso || '';
+                    const delTipo = actividadesSeleccion.filter(
+                        (actividad) => (actividad.dataset.tipoRecurso || '') === tipo
+                    );
+                    const marcadas = delTipo.filter((actividad) => actividad.checked).length;
+                    filtro.checked = delTipo.length > 0 && marcadas === delTipo.length;
+                    filtro.indeterminate = marcadas > 0 && marcadas < delTipo.length;
+                });
+            }
+
+            filtrosTipoRecurso.forEach((filtro) => {
+                filtro.addEventListener('change', () => {
+                    const tipo = filtro.dataset.tipoRecurso || '';
+                    actividadesSeleccion.forEach((actividad) => {
+                        if ((actividad.dataset.tipoRecurso || '') === tipo) {
+                            actividad.checked = filtro.checked;
+                        }
+                    });
+                    actualizarEstadoSeleccion();
+                });
+            });
+
+            actividadesSeleccion.forEach((actividad) => {
+                actividad.addEventListener('change', actualizarEstadoSeleccion);
+            });
+
+            if (botonSeleccionarTodas) {
+                botonSeleccionarTodas.addEventListener('click', () => {
+                    actividadesSeleccion.forEach((actividad) => { actividad.checked = true; });
+                    actualizarEstadoSeleccion();
+                });
+            }
+
+            if (botonLimpiarSeleccion) {
+                botonLimpiarSeleccion.addEventListener('click', () => {
+                    actividadesSeleccion.forEach((actividad) => { actividad.checked = false; });
+                    actualizarEstadoSeleccion();
+                });
+            }
+
+            actualizarEstadoSeleccion();
+
             if (formularioInicio) {
-                formularioInicio.addEventListener('submit', () => {
+                formularioInicio.addEventListener('submit', (evento) => {
+                    const totalMarcadas = actividadesSeleccion.filter((item) => item.checked).length;
+                    if (actividadesSeleccion.length && totalMarcadas === 0) {
+                        evento.preventDefault();
+                        alert('Selecciona al menos una actividad para cargar en PRIZMA.');
+                        return;
+                    }
                     mostrarLoader('Procesando cargue...');
                 });
             }
@@ -4918,6 +5163,7 @@ RUTAS_PUBLICAS = {
     "/favicon.ico",
     "/auto-prizma-logo.png",
     "/estilos-responsive.css",
+    "/tema.js",
 }
 
 
@@ -5080,9 +5326,198 @@ img, svg, video { max-width: 100%; height: auto; }
   .sidebar .nav-item { padding: 9px 11px !important; font-size: 12px !important; }
 }
 
+.logo-imagen { width:100% !important; height:100% !important; object-fit:contain !important; display:block !important; }
+
+/* ---------- tema oscuro ---------- */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  background: #0b1020;
+}
+html[data-theme="dark"] body { background: #0b1020 !important; color: #e5e7eb !important; }
+html[data-theme="dark"] .sidebar,
+html[data-theme="dark"] .panel,
+html[data-theme="dark"] .panel-principal,
+html[data-theme="dark"] .tabla-panel,
+html[data-theme="dark"] .credenciales-panel,
+html[data-theme="dark"] .carga-card,
+html[data-theme="dark"] .vacio,
+html[data-theme="dark"] .caja,
+html[data-theme="dark"] .estado-servicio,
+html[data-theme="dark"] .google-conexion,
+html[data-theme="dark"] .nota,
+html[data-theme="dark"] .resumen-card,
+html[data-theme="dark"] .seleccion-tipo-card {
+  background: #111827 !important;
+  color: #e5e7eb !important;
+  border-color: #263244 !important;
+  box-shadow: none !important;
+}
+html[data-theme="dark"] h1,
+html[data-theme="dark"] h2,
+html[data-theme="dark"] h3,
+html[data-theme="dark"] strong,
+html[data-theme="dark"] label,
+html[data-theme="dark"] th,
+html[data-theme="dark"] td { color: #f3f4f6 !important; }
+html[data-theme="dark"] p,
+html[data-theme="dark"] span,
+html[data-theme="dark"] small,
+html[data-theme="dark"] .sub,
+html[data-theme="dark"] .marca span,
+html[data-theme="dark"] .curso-texto p { color: #aeb9ca !important; }
+html[data-theme="dark"] .nav-item { color: #cbd5e1 !important; }
+html[data-theme="dark"] .nav-item:hover,
+html[data-theme="dark"] .nav-item.activo { background: #1d2540 !important; color: #c7d2fe !important; }
+html[data-theme="dark"] input,
+html[data-theme="dark"] select,
+html[data-theme="dark"] textarea,
+html[data-theme="dark"] .campo-moderno {
+  background: #0f172a !important;
+  color: #f3f4f6 !important;
+  border-color: #334155 !important;
+}
+html[data-theme="dark"] input::placeholder,
+html[data-theme="dark"] textarea::placeholder { color: #64748b !important; }
+html[data-theme="dark"] table,
+html[data-theme="dark"] thead,
+html[data-theme="dark"] tbody,
+html[data-theme="dark"] tr { background: transparent !important; }
+html[data-theme="dark"] th { background: #172033 !important; border-color: #263244 !important; }
+html[data-theme="dark"] td { border-color: #263244 !important; }
+html[data-theme="dark"] .caja-seguridad,
+html[data-theme="dark"] .alerta,
+html[data-theme="dark"] .error { background: #2a1a1a !important; border-color: #633 !important; }
+html[data-theme="dark"] .boton-secundario { background: #172033 !important; color: #dbe4f0 !important; border-color: #334155 !important; }
+html[data-theme="dark"] .contador,
+html[data-theme="dark"] .chip,
+html[data-theme="dark"] .estado-chip { background: #1e293b !important; color: #cbd5e1 !important; }
+html[data-theme="dark"] .sidebar { border-color: #263244 !important; }
+html[data-theme="dark"] .filtro-recurso-item {
+  background: #111827 !important;
+  border-color: #334155 !important;
+}
+html[data-theme="dark"] .filtro-recurso-item:hover {
+  background: #172033 !important;
+  border-color: #6d5dfc !important;
+}
+html[data-theme="dark"] .filtro-recurso-item:has(input:checked) {
+  background: #1d2540 !important;
+  border-color: #7c6ff0 !important;
+}
+html[data-theme="dark"] .filtro-recurso-texto strong {
+  color: #f8fafc !important;
+}
+html[data-theme="dark"] .filtro-recurso-texto small {
+  color: #aeb9ca !important;
+}
+
+/* Inicio: evitar fondos claros con texto claro en modo oscuro. */
+html[data-theme="dark"] .encabezado-pagina,
+html[data-theme="dark"] .selector-modo-matriz label,
+html[data-theme="dark"] .tarjeta-archivo,
+html[data-theme="dark"] .tarjeta-tipo,
+html[data-theme="dark"] .selector-archivo {
+  background: #111827 !important;
+  color: #e5e7eb !important;
+  border-color: #334155 !important;
+  box-shadow: none !important;
+}
+html[data-theme="dark"] .selector-modo-matriz label:hover,
+html[data-theme="dark"] .tarjeta-archivo:hover,
+html[data-theme="dark"] .tarjeta-archivo.arrastrando,
+html[data-theme="dark"] .tarjeta-tipo:hover {
+  background: #172033 !important;
+  border-color: #6d5dfc !important;
+}
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-verde,
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-azul,
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-morado {
+  background: #172033 !important;
+}
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-verde { border-color: #2fbf7f !important; }
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-azul { border-color: #4b9ee8 !important; }
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-morado { border-color: #8b7cf6 !important; }
+html[data-theme="dark"] .archivo-cabecera strong,
+html[data-theme="dark"] .tarjeta-tipo strong {
+  color: #f8fafc !important;
+}
+html[data-theme="dark"] .archivo-cabecera span,
+html[data-theme="dark"] .tarjeta-tipo small,
+html[data-theme="dark"] .nombre-archivo {
+  color: #aeb9ca !important;
+}
+html[data-theme="dark"] .boton-selector {
+  background: #5b48e8 !important;
+  color: #ffffff !important;
+}
+html[data-theme="dark"] .numero-seccion {
+  background: #26204d !important;
+  color: #c4b5fd !important;
+}
+
+
+/* Cargue en progreso: evitar fondos claros con texto claro en modo oscuro. */
+html[data-theme="dark"] .lista-actividades,
+html[data-theme="dark"] .actividad-progreso,
+html[data-theme="dark"] .estado-panel .estado-caja {
+  background: #111827 !important;
+  color: #e5e7eb !important;
+  border-color: #263244 !important;
+}
+html[data-theme="dark"] .actividad-progreso {
+  border-bottom-color: #263244 !important;
+}
+html[data-theme="dark"] .actividad-progreso.actividad-procesando {
+  background: #1d1b36 !important;
+  box-shadow: inset 3px 0 0 #7c6ff0 !important;
+}
+html[data-theme="dark"] .actividad-progreso.actividad-ok {
+  background: #10251d !important;
+}
+html[data-theme="dark"] .actividad-progreso.actividad-error-fila {
+  background: #2a1719 !important;
+}
+html[data-theme="dark"] .actividad-nombre,
+html[data-theme="dark"] .estado-caja strong,
+html[data-theme="dark"] .leyenda div {
+  color: #e5e7eb !important;
+}
+html[data-theme="dark"] .estado-caja span {
+  color: #aeb9ca !important;
+}
+
+.tema-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 9999;
+  width: 42px;
+  height: 42px;
+  border: 1px solid #d0d5dd;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #344054;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(16,24,40,.10);
+  transition: transform .15s ease, background .2s ease, color .2s ease;
+}
+.tema-toggle:hover { transform: translateY(-1px); }
+html[data-theme="dark"] .tema-toggle {
+  background: #172033;
+  color: #f8fafc;
+  border-color: #334155;
+  box-shadow: 0 8px 24px rgba(0,0,0,.28);
+}
+@media (max-width: 700px) {
+  .tema-toggle { top: 10px; right: 10px; width: 38px; height: 38px; border-radius: 10px; }
+}
+
 /* ---------- impresion ---------- */
 @media print {
-  .sidebar, .nav, .boton, .boton-secundario { display: none !important; }
+  .sidebar, .nav, .boton, .boton-secundario, .tema-toggle { display: none !important; }
   .app { grid-template-columns: 1fr !important; }
 }
 """
@@ -5107,11 +5542,73 @@ def estilos_responsive():
     )
 
 
+JS_TEMA = r"""
+(function () {
+  var CLAVE = "autoPrizmaTema";
+
+  function leerTema() {
+    try {
+      return localStorage.getItem(CLAVE) === "dark" ? "dark" : "light";
+    } catch (_) {
+      return "light";
+    }
+  }
+
+  function guardarTema(tema) {
+    try { localStorage.setItem(CLAVE, tema); } catch (_) {}
+  }
+
+  function aplicarTema(tema) {
+    document.documentElement.setAttribute("data-theme", tema);
+    var boton = document.querySelector(".tema-toggle");
+    if (boton) {
+      var oscuro = tema === "dark";
+      boton.textContent = oscuro ? "☀️" : "🌙";
+      boton.title = oscuro ? "Cambiar a tema claro" : "Cambiar a tema oscuro";
+      boton.setAttribute("aria-label", boton.title);
+    }
+  }
+
+  aplicarTema(leerTema());
+
+  function instalarBoton() {
+    if (!document.body || document.querySelector(".tema-toggle")) return;
+    var boton = document.createElement("button");
+    boton.type = "button";
+    boton.className = "tema-toggle";
+    boton.addEventListener("click", function () {
+      var actual = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+      var siguiente = actual === "dark" ? "light" : "dark";
+      guardarTema(siguiente);
+      aplicarTema(siguiente);
+    });
+    document.body.appendChild(boton);
+    aplicarTema(leerTema());
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", instalarBoton, { once: true });
+  } else {
+    instalarBoton();
+  }
+})();
+"""
+
+
+@app.get("/tema.js")
+def tema_javascript():
+    return Response(
+        content=JS_TEMA,
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
+
+
 def _pagina_login(error="", usuario_previo=""):
     plantilla = r"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Ingresar - Auto Prizma Pro</title>
+<title>Ingresar - Cargue Prizma Pro</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#f7f8fc;
@@ -5136,11 +5633,11 @@ button:hover{background:#1059c4}
 .error{background:#fef3f2;border:1px solid #fecdca;color:#b42318;padding:11px 13px;
 border-radius:10px;font-size:13px;margin-bottom:18px}
 .pie{margin-top:20px;font-size:12px;color:#98a2b3;text-align:center;line-height:1.6}
-</style><link rel="stylesheet" href="/estilos-responsive.css"></head><body>
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body>
 <form class="caja" method="post" action="/login">
   <div class="marca">
-    <div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div>
-    <div><strong>Auto Prizma Pro</strong><span>Automatizacion PRIZMA</span></div>
+    <div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div>
+    <div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div>
   </div>
   <h1>Ingresar</h1>
   <p class="sub">Usa el usuario que te entregaron.</p>
@@ -5281,7 +5778,7 @@ def cambiar_clave_formulario(mensaje: str = "", error: str = ""):
     plantilla = r"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cambiar contrasena - Auto Prizma Pro</title>
+<title>Cambiar contrasena - Cargue Prizma Pro</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fc;color:#101828;
@@ -5300,7 +5797,7 @@ border-radius:10px;font-size:13px;margin-bottom:16px}
 .ok{background:#ecfdf3;border:1px solid #abefc6;color:#067647;padding:11px;
 border-radius:10px;font-size:13px;margin-bottom:16px}
 .volver{display:block;text-align:center;margin-top:16px;font-size:13px;color:#667085}
-</style><link rel="stylesheet" href="/estilos-responsive.css"></head><body>
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body>
 <form class="caja" method="post" action="/cambiar-clave">
   <h1>Cambiar contrasena</h1>
   <p class="sub">Sesion de <strong>__USUARIO__</strong></p>
@@ -5834,10 +6331,28 @@ def iniciar_trabajo(
     background_tasks: BackgroundTasks,
     usuario_prizma: str = Form(...),
     contrasena_prizma: str = Form(...),
+    actividades_seleccionadas: list[str] = Form(default=[]),
 ):
     trabajo = TRABAJOS.get(trabajo_id)
     if not trabajo or not _es_de(trabajo, _usuario_actual()):
         return HTMLResponse("<h2>Trabajo no encontrado.</h2><a href='/'>Volver</a>", status_code=404)
+
+    seleccion_validada = _validar_seleccion_actividades(
+        actividades_seleccionadas,
+        trabajo.get("resultado_analisis") or {},
+    )
+    if not seleccion_validada:
+        return generar_html(
+            resultado=trabajo.get("resultado_analisis"),
+            trabajo_id=trabajo_id,
+            error=(
+                "Selecciona al menos una actividad para cargar en PRIZMA. "
+                "Puedes elegir por tipo de recurso o actividad individual."
+            ),
+            seleccion_actual=[],
+        )
+
+    trabajo["seleccion_actividades"] = seleccion_validada
 
     usuario_prizma = usuario_prizma.strip()
     if not usuario_prizma or not contrasena_prizma:
@@ -5845,6 +6360,7 @@ def iniciar_trabajo(
             resultado=trabajo.get("resultado_analisis"),
             trabajo_id=trabajo_id,
             error="Debes ingresar el usuario y la contraseña de PRIZMA.",
+            seleccion_actual=seleccion_validada,
         )
 
     if trabajo.get("etapa") not in ["analizado", "error"]:
@@ -5862,6 +6378,7 @@ def iniciar_trabajo(
             resultado=trabajo.get("resultado_analisis"),
             trabajo_id=trabajo_id,
             error=trabajo["mensaje"],
+            seleccion_actual=seleccion_validada,
         )
 
     _encolar_trabajo(trabajo_id, usuario_prizma, contrasena_prizma)
@@ -5872,7 +6389,7 @@ def iniciar_trabajo(
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Cargue en progreso - Auto Prizma Pro</title>
+        <title>Cargue en progreso - Cargue Prizma Pro</title>
         <style>
             :root {
                 --fondo:#f7f8fc; --panel:#fff; --texto:#101828; --muted:#667085;
@@ -5940,19 +6457,14 @@ def iniciar_trabajo(
             .pie { margin-top:18px; color:var(--muted); font-size:12px; text-align:center; }
             @media(max-width:1050px) { .app{grid-template-columns:1fr}.sidebar{display:none}.contenido{padding:20px}.zona{grid-template-columns:1fr} }
             @media(max-width:680px) { .numeros{grid-template-columns:1fr}.contenido{padding:14px}.cabecera-linea{align-items:flex-start;flex-direction:column} }
-        </style><link rel="stylesheet" href="/estilos-responsive.css">
+        </style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script>
     </head>
     <body>
         <div class="app">
             <aside class="sidebar">
                 <div class="marca">
-                    <div class="logo" aria-label="Auto Prizma Pro">
-                        <svg viewBox="0 0 48 48" aria-hidden="true">
-                            <path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/>
-                            <path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/>
-                        </svg>
-                    </div>
-                    <div><strong>Auto Prizma Pro</strong><span>Cargue automático</span></div>
+                    <div class="logo" aria-label="Cargue Prizma Pro"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div>
+                    <div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div>
                 </div>
                 <nav class="nav">
                     <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
@@ -6146,10 +6658,10 @@ def iniciar_trabajo(
 
 def _pagina_sin_cargue_actual():
     return HTMLResponse(r'''<!DOCTYPE html>
-<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Auto Prizma Pro</title>
+<html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Cargue Prizma Pro</title>
 <style>
 :root{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 12px 34px rgba(29,41,57,.06)}*{box-sizing:border-box}body{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}.app{min-height:100vh;display:grid;grid-template-columns:235px 1fr}.sidebar{height:100vh;background:#fff;border-right:1px solid var(--borde);padding:28px 20px;display:flex;flex-direction:column}.marca{display:flex;align-items:center;gap:12px;margin-bottom:34px}.logo{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#6d5dfc,#4338ca);box-shadow:0 8px 20px rgba(79,70,229,.25)}.logo svg{width:29px;height:29px}.logo svg path:first-child{fill:#fff}.logo svg path:last-child{fill:#c7d2fe}.marca strong{display:block;font-size:18px}.marca span{display:block;color:var(--muted);font-size:12px;margin-top:3px}.nav{display:grid;gap:8px}.nav-item{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;display:flex;gap:11px;align-items:center;text-decoration:none}.nav-item:hover{background:#f7f5ff;color:#4f46e5}.nav-item.activo{background:#f1efff;color:#4f46e5;font-weight:700}.estado-servicio{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}.servicio-linea{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}.punto{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}.servicio-mini{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}.chip{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}.contenido{padding:30px 34px;display:grid;place-items:center}.vacio{width:min(680px,100%);background:#fff;border:1px solid var(--borde);border-radius:18px;box-shadow:var(--sombra);padding:54px 34px;text-align:center}.icono{width:68px;height:68px;border-radius:20px;background:#f1efff;color:#5548e8;display:grid;place-items:center;margin:0 auto 20px;font-size:28px;font-weight:800}.vacio h1{margin:0 0 10px;font-size:27px}.vacio p{margin:0 auto 24px;color:var(--muted);font-size:14px;line-height:1.6;max-width:480px}.boton{display:inline-flex;padding:12px 18px;border-radius:10px;background:linear-gradient(90deg,#5548e8,#6546e8);color:#fff;text-decoration:none;font-size:13px;font-weight:800}@media(max-width:900px){.app{grid-template-columns:1fr}.sidebar{display:none}.contenido{padding:18px}}
-</style><link rel="stylesheet" href="/estilos-responsive.css"></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="vacio"><div class="icono">⇧</div><h1>No hay cargues activos</h1><p>Cuando alguien inicie un proceso desde Inicio, aparecerá aquí para que el equipo pueda consultar su progreso.</p><a class="boton" href="/">Iniciar un nuevo cargue</a></section></main></div></body></html>''')
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div><div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="vacio"><div class="icono">⇧</div><h1>No hay cargues activos</h1><p>Cuando alguien inicie un proceso desde Inicio, aparecerá aquí para que el equipo pueda consultar su progreso.</p><a class="boton" href="/">Iniciar un nuevo cargue</a></section></main></div></body></html>''')
 
 
 def _formatear_inicio_cargue(fecha_iso):
@@ -6237,9 +6749,9 @@ def _pagina_cargues_activos(trabajos, usuario_actual=None):
     cuerpo = "".join(tarjetas)
     cantidad = len(trabajos)
     plural = "s" if cantidad != 1 else ""
-    return HTMLResponse(f'''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Auto Prizma Pro</title><style>
+    return HTMLResponse(f'''<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Cargue actual - Cargue Prizma Pro</title><style>
 :root{{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 10px 30px rgba(29,41,57,.05)}}*{{box-sizing:border-box}}body{{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}}.app{{min-height:100vh;display:grid;grid-template-columns:235px 1fr}}.sidebar{{position:sticky;top:0;height:100vh;background:#fff;border-right:1px solid var(--borde);padding:28px 20px;display:flex;flex-direction:column}}.marca{{display:flex;align-items:center;gap:12px;margin-bottom:34px}}.logo{{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(145deg,#6d5dfc,#4338ca);box-shadow:0 8px 20px rgba(79,70,229,.25)}}.logo svg{{width:29px;height:29px}}.logo svg path:first-child{{fill:#fff}}.logo svg path:last-child{{fill:#c7d2fe}}.marca strong{{display:block;font-size:18px}}.marca span{{display:block;color:var(--muted);font-size:12px;margin-top:3px}}.nav{{display:grid;gap:8px}}.nav-item{{padding:12px 14px;border-radius:11px;color:#475467;font-size:14px;display:flex;gap:11px;align-items:center;text-decoration:none}}.nav-item:hover{{background:#f7f5ff;color:#4f46e5}}.nav-item.activo{{background:#f1efff;color:#4f46e5;font-weight:700}}.estado-servicio{{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}}.servicio-linea{{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}}.punto{{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}}.servicio-mini{{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}}.chip{{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}}.contenido{{padding:34px 36px 44px;min-width:0}}.cabecera-top{{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:24px}}.cabecera h1{{font-size:29px;margin:0 0 7px}}.cabecera p{{margin:0;color:var(--muted);font-size:14px;line-height:1.5}}.contador{{background:#f1efff;color:#5548e8;border-radius:999px;padding:8px 12px;font-size:12px;font-weight:800;white-space:nowrap}}.lista{{display:grid;gap:16px}}.carga-card{{background:#fff;border:1px solid var(--borde);border-radius:17px;box-shadow:var(--sombra);padding:22px;display:grid;grid-template-columns:minmax(245px,1.15fr) 170px minmax(320px,1.25fr) 185px;gap:22px;align-items:center}}.curso-bloque{{display:flex;gap:14px;align-items:center;min-width:0}}.curso-icono{{width:58px;height:58px;border-radius:15px;background:#f1efff;color:#5548e8;display:grid;place-items:center;font-size:24px;flex:0 0 58px}}.curso-texto{{min-width:0}}.curso-texto h2{{font-size:16px;margin:0 0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.curso-texto p{{font-size:12px;color:var(--muted);margin:0 0 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.estado-chip{{display:inline-flex;align-items:center;gap:6px;background:#eef6ff;color:#1473e6;border-radius:999px;padding:5px 9px;font-size:11px;font-weight:800}}.estado-chip span{{width:6px;height:6px;background:#2e90fa;border-radius:50%}}.inicio-bloque small{{display:block;color:var(--muted);font-size:11px;margin-bottom:7px}}.inicio-bloque strong{{font-size:12px;color:#475467}}.avance-cab{{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;color:var(--muted);font-size:11px}}.avance-cab strong{{font-size:21px;color:#5548e8}}.barra{{height:10px;border-radius:999px;background:#eeecff;overflow:hidden}}.barra-interna{{height:100%;background:linear-gradient(90deg,#6759f5,#4f46e5);border-radius:999px}}.metricas{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}}.metricas div{{display:grid;grid-template-columns:8px 1fr;column-gap:5px;align-items:center}}.metricas i{{width:7px;height:7px;border-radius:50%}}.metricas i.verde{{background:#12b76a}}.metricas i.rojo{{background:#ef4444}}.metricas small{{font-size:10px;color:var(--muted)}}.metricas strong{{grid-column:2;font-size:14px;margin-top:2px}}.accion-bloque{{border-left:1px solid var(--borde);padding-left:20px;text-align:center}}.accion-bloque a{{display:flex;justify-content:center;align-items:center;gap:8px;background:linear-gradient(90deg,#5548e8,#6546e8);color:#fff;text-decoration:none;font-size:12px;font-weight:800;border-radius:10px;padding:12px 13px}}.accion-bloque b{{font-size:18px}}.accion-bloque small{{display:block;color:var(--muted);font-size:10px;margin-top:8px}}.nota{{margin-top:18px;border:1px solid #ddd8ff;background:#faf9ff;border-radius:14px;padding:14px 17px;color:#475467;font-size:12px}}@media(max-width:1200px){{.carga-card{{grid-template-columns:1fr 1fr}}.accion-bloque{{border-left:0;padding-left:0}}}}@media(max-width:900px){{.app{{grid-template-columns:1fr}}.sidebar{{display:none}}.contenido{{padding:20px}}.carga-card{{grid-template-columns:1fr}}}}
-</style><link rel="stylesheet" href="/estilos-responsive.css"></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="cabecera"><div class="cabecera-top"><div><h1>Cargue actual</h1><p>Aquí puedes ver todos los cursos que están siendo procesados actualmente.<br>Entra a un proceso para revisar el detalle de sus actividades.</p></div><div class="contador">{cantidad} proceso{plural} activo{plural}</div></div></section><section class="lista">{cuerpo}</section><div class="nota"><strong>Vista global del equipo.</strong> Cada tarjeta representa un cargue activo. Para ver la lista detallada de actividades, entra al proceso correspondiente.</div></main></div><script>setTimeout(function(){{window.location.reload();}},3000);</script></body></html>''')
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div><div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div></div><nav class="nav"><a class="nav-item" href="/">⌂ <span>Inicio</span></a><a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a><a class="nav-item" href="/historial">◷ <span>Historial</span></a><a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a></nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido"><section class="cabecera"><div class="cabecera-top"><div><h1>Cargue actual</h1><p>Aquí puedes ver todos los cursos que están siendo procesados actualmente.<br>Entra a un proceso para revisar el detalle de sus actividades.</p></div><div class="contador">{cantidad} proceso{plural} activo{plural}</div></div></section><section class="lista">{cuerpo}</section><div class="nota"><strong>Vista global del equipo.</strong> Cada tarjeta representa un cargue activo. Para ver la lista detallada de actividades, entra al proceso correspondiente.</div></main></div><script>setTimeout(function(){{window.location.reload();}},3000);</script></body></html>''')
 
 
 @app.get("/cargue-actual", response_class=HTMLResponse)
@@ -6488,7 +7000,7 @@ def _pagina_registros(tipo="historial"):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>__TITULO__ - Auto Prizma Pro</title>
+    <title>__TITULO__ - Cargue Prizma Pro</title>
     <style>
         :root{--fondo:#f7f8fc;--panel:#fff;--texto:#101828;--muted:#667085;--borde:#e5e7ef;--morado:#5548e8;--sombra:0 12px 34px rgba(29,41,57,.06)}
         *{box-sizing:border-box} body{margin:0;font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--fondo);color:var(--texto)}
@@ -6501,12 +7013,12 @@ def _pagina_registros(tipo="historial"):
         .herramientas{display:grid;grid-template-columns:minmax(260px,1fr) 290px;gap:18px;margin:28px 0 22px}.buscador,.filtro{height:52px;border:1px solid #d8dce6;border-radius:11px;background:#fff;display:flex;align-items:center;gap:10px;padding:0 15px;color:#667085}.buscador input,.filtro select{width:100%;border:0;outline:0;background:transparent;font-size:14px;color:#475467}.filtro select{cursor:pointer}
         .tabla-wrap{border:1px solid var(--borde);border-radius:14px;overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px;min-width:__MIN_TABLE__}thead{background:#faf9ff}th{text-align:left;padding:15px 16px;color:#4338ca;font-size:12px;border-bottom:1px solid var(--borde)}td{padding:15px 16px;border-bottom:1px solid #eef0f4;vertical-align:middle;color:#344054}tbody tr:last-child td{border-bottom:0}.fecha-celda{display:flex;align-items:center;gap:11px;white-space:nowrap}.fecha-celda strong{display:block;font-weight:500}.fecha-celda small{display:block;color:#98a2b3;margin-top:4px}.icono-fecha{width:34px;height:34px;border-radius:9px;background:#f4f1ff;color:#6d5dfc;display:grid;place-items:center}.accion-celda{white-space:nowrap}.boton-reporte{display:inline-flex;align-items:center;gap:7px;border:1px solid #d7d0ff;color:#5b4ce8;text-decoration:none;border-radius:9px;padding:9px 12px;font-weight:700;font-size:12px;background:#fff}.boton-reporte:hover{background:#f7f5ff}.archivo-reporte{max-width:390px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vacio{text-align:center;color:#98a2b3;padding:50px 20px!important}.oculta{display:none}
         @media(max-width:1050px){.app{grid-template-columns:1fr}.sidebar{display:none}.contenido{padding:20px}}@media(max-width:700px){.contenido{padding:12px}.panel{padding:18px}.cabecera{flex-direction:column}.herramientas{grid-template-columns:1fr}}
-    </style><link rel="stylesheet" href="/estilos-responsive.css">
+    </style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script>
 </head>
 <body>
 <div class="app">
     <aside class="sidebar">
-        <div class="marca"><div class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div>
+        <div class="marca"><div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div><div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div></div>
         <nav class="nav">
             <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
             <a class="nav-item" href="/tests">▣ <span>Test</span></a>
@@ -6670,7 +7182,7 @@ def _pagina_reporte_html(titulo, subtitulo, ruta_csv, url_descarga):
     return f"""<!DOCTYPE html>
 <html lang="es"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{e(titulo)} - Auto Prizma Pro</title>
+<title>{e(titulo)} - Cargue Prizma Pro</title>
 <style>
 :root{{--fondo:#f7f8fc;--texto:#101828;--muted:#667085;--borde:#e5e7ef}}
 *{{box-sizing:border-box}}
@@ -6705,12 +7217,12 @@ border-radius:10px;text-decoration:none;font-size:13px;font-weight:700}}
 .boton-secundario{{background:#fff;color:#4f46e5;border:1px solid #d8d6f8}}
 .tarjetas{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px}}
 tbody tr:hover{{background:#fafaff}}
-</style><link rel="stylesheet" href="/estilos-responsive.css"></head>
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head>
 <body><div class="app">
 <aside class="sidebar">
   <div class="marca">
-    <div class="logo"><svg viewBox="0 0 48 48"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div>
-    <div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div>
+    <div class="logo"><img class="logo-imagen" src="/auto-prizma-logo.png" alt="Logo Cargue Prizma Pro"></div>
+    <div><strong>Cargue Prizma Pro</strong><span>Cargue Prizma</span></div>
   </div>
   <nav class="nav">
     <a class="nav-item" href="/">⌂ <span>Inicio</span></a>

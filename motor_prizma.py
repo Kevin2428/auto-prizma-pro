@@ -184,6 +184,33 @@ def normalizar_categoria(categoria):
 # VARIANTES SEGURAS DE PROGRAMA
 # ============================================================
 
+# Equivalencias academicas explicitas observadas en PRIZMA.
+# Cada grupo representa nombres distintos que pertenecen a la misma
+# linea/programa para efectos de localizar una actividad.
+#
+# IMPORTANTE: evitar fuzzy matching general. Para agregar un caso nuevo,
+# agregarlo explicitamente al grupo correcto o crear uno nuevo.
+EQUIVALENCIAS_PROGRAMAS = (
+    {
+        "administracion de empresas",
+        "tecnologia en gestion empresarial",
+    },
+    {
+        "administracion turistica y hotelera",
+        "tecnologia en gestion turistica y hoteles",
+    },
+    {
+        "contaduria publica",
+        "tecnica profesional en procesos contables",
+    },
+    {
+        "negocios internacionales",
+        "tecnica virtual profesional en procesos logisticos y de comercio exterior",
+        "tecnica vistural profesional en procesos logisticos y de comercio exterior",
+    },
+)
+
+
 def obtener_variantes_programa(
     programa,
 ):
@@ -198,6 +225,14 @@ def obtener_variantes_programa(
     variantes = {
         programa_n
     }
+
+    # Si el nombre pertenece a un grupo de equivalencias conocido,
+    # aceptamos todos los nombres de ese mismo grupo. La relacion es
+    # deliberadamente explicita y bidireccional.
+    for grupo in EQUIVALENCIAS_PROGRAMAS:
+        if programa_n in grupo:
+            variantes.update(grupo)
+            break
 
     partes = programa_n.split()
 
@@ -275,7 +310,7 @@ def limpiar_prefijo_tecnico_recurso(
     )
 
     nombre_n = re.sub(
-        r"^u\d+\s+t\d+\s+",
+        r"^u\d+\s*t\d+\s+",
         "",
         nombre_n,
     )
@@ -2132,9 +2167,10 @@ def analizar_resultados_pagina(
             "categoria_prizma"
         ] == "OVA":
 
-            cumple_categoria = (
-                "ova" in texto_n
-            )
+            # En OVA la fila puede no mostrar literalmente la categoría
+            # dentro de su texto. La categoría ya quedó validada al
+            # entrar explícitamente a la pestaña OVA.
+            cumple_categoria = True
 
         elif actividad[
             "categoria_prizma"
@@ -4707,6 +4743,41 @@ def _registrar_respuesta_prizma(response, respuestas, captura):
 
 
 # ============================================================
+# SELECCION DE ACTIVIDADES POST-ANALISIS
+# ============================================================
+
+
+def filtrar_actividades_seleccionadas(actividades, seleccion_actividades=None):
+    """Devuelve solo las actividades elegidas por hoja + fila.
+
+    ``None`` conserva el comportamiento historico y procesa todas. Una lista
+    vacia significa que el usuario no eligio ninguna actividad.
+    """
+    if seleccion_actividades is None:
+        return list(actividades or [])
+
+    claves = set()
+    for item in seleccion_actividades or []:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        hoja = str(item[0] or "")
+        try:
+            fila = int(item[1])
+        except (TypeError, ValueError):
+            continue
+        claves.add((hoja, fila))
+
+    return [
+        actividad
+        for actividad in (actividades or [])
+        if (
+            str(actividad.get("hoja") or ""),
+            int(actividad.get("fila_excel") or 0),
+        ) in claves
+    ]
+
+
+# ============================================================
 # MOTOR COMPLETO
 # ============================================================
 
@@ -4744,6 +4815,7 @@ def ejecutar_cargue(
     usuario_prizma,
     contrasena_prizma,
     estado,
+    seleccion_actividades=None,
 ):
     navegador = None
 
@@ -4777,11 +4849,19 @@ def ejecutar_cargue(
             procesar_retos,
         )
 
+        actividades = filtrar_actividades_seleccionadas(
+            actividades,
+            seleccion_actividades,
+        )
+
         if not actividades:
             actualizar_estado(
                 estado,
                 etapa="error",
-                mensaje="No se encontraron actividades OVI/OVA/Retos compatibles.",
+                mensaje=(
+                    "No se encontraron actividades seleccionadas para cargar "
+                    "en PRIZMA."
+                ),
                 terminado=True,
             )
             return
