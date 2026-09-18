@@ -3914,7 +3914,7 @@ def validar_credenciales_prizma(
         with sync_playwright() as p:
             navegador = p.chromium.launch(
                 headless=True,
-                args=["--disable-dev-shm-usage"],
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
             try:
                 pagina = navegador.new_page(
@@ -4834,7 +4834,7 @@ def ejecutar_cargue(
 
                 navegador = p.chromium.launch(
                     headless=True,
-                    args=["--disable-dev-shm-usage"],
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
                 )
                 nueva_pagina = navegador.new_page(
                     viewport={"width": 1440, "height": 900}

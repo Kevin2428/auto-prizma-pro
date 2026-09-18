@@ -656,6 +656,30 @@ def _google_conectado(usuario=None):
     )
 
 
+def _descargar_google_docx_para_tests(url_google_doc, usuario=None):
+    """Exporta un Google Doc privado como DOCX para el parser de tests."""
+    match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", str(url_google_doc or ""))
+    if not match:
+        raise ValueError("El enlace de Google Docs no tiene un ID válido.")
+
+    credenciales = _cargar_credenciales_google(usuario)
+    if credenciales is None:
+        raise RuntimeError("Conecta Google desde Inicio antes de usar un documento privado.")
+
+    servicio = build("drive", "v3", credentials=credenciales, cache_discovery=False)
+    solicitud = servicio.files().export_media(
+        fileId=match.group(1),
+        mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    contenido = BytesIO()
+    descarga = MediaIoBaseDownload(contenido, solicitud)
+    completada = False
+    while not completada:
+        _, completada = descarga.next_chunk()
+
+    return contenido.getvalue(), "google_doc_" + match.group(1) + ".docx"
+
+
 # ============================================================
 # GOOGLE DRIVE PRIVADO - MODO ULTRARRAPIDO
 # ============================================================
@@ -2801,6 +2825,7 @@ def _encolar_trabajo(trabajo_id, usuario_prizma, contrasena_prizma):
         trabajo = TRABAJOS[trabajo_id]
         trabajo["usuario_prizma_temporal"] = usuario_prizma
         trabajo["contrasena_prizma_temporal"] = contrasena_prizma
+        trabajo["credenciales_prizma"] = {"usuario": usuario_prizma, "clave": contrasena_prizma}
         trabajo["etapa"] = "en_cola"
         trabajo["mensaje"] = "Cargue agregado a la cola de procesamiento."
         trabajo["encolado_en"] = _ahora_colombia_iso()
@@ -2850,6 +2875,83 @@ def _despachar_cargues_pendientes():
     COLA_CONDICION.notify_all()
 
 
+def _ejecutar_test_en_cargue(trabajo, test_job_id, usuario, contrasena):
+    from test_module.web import ejecutar_test_job, _JOBS, _JOBS_LOCK
+    with _JOBS_LOCK:
+        job_test = _JOBS.get(test_job_id)
+    if not job_test:
+        return
+
+    doc = job_test.get("document")
+    if not doc or not getattr(doc, "tests", None):
+        return
+
+    tests_list = doc.tests
+    num_tests = len(tests_list)
+    if num_tests == 0:
+        return
+
+    detalle = trabajo.setdefault("detalle_actividades", [])
+    offset = len(detalle)
+    for idx, t in enumerate(tests_list, start=1):
+        num_preg = sum(len(sec.questions) for sec in t.sections)
+        detalle.append({
+            "numero": offset + idx,
+            "nombre": f"Test Evaluativo: {t.title or f'Test {idx}'} ({num_preg} preguntas)",
+            "estado": "pendiente",
+            "error": "",
+        })
+
+    trabajo["total"] = len(detalle)
+    trabajo["terminado"] = False
+    trabajo["etapa"] = "cargando_test"
+    trabajo["mensaje"] = f"Iniciando cargue del Test Evaluativo en PRIZMA ({num_tests} examen{'es' if num_tests > 1 else ''})..."
+
+    def on_test(indice, estado_test, msg_test, err=""):
+        item_idx = offset + indice - 1
+        if 0 <= item_idx < len(trabajo["detalle_actividades"]):
+            item = trabajo["detalle_actividades"][item_idx]
+            if estado_test == "en_proceso":
+                item["estado"] = "procesando"
+                trabajo["mensaje"] = f"Cargando {item['nombre']}..."
+            elif estado_test == "exitoso":
+                item["estado"] = "ok"
+                trabajo["procesadas"] = (trabajo.get("procesadas") or 0) + 1
+                trabajo["exitosas"] = (trabajo.get("exitosas") or 0) + 1
+                trabajo["mensaje"] = f"{item['nombre']} guardado con éxito."
+            elif estado_test == "error":
+                item["estado"] = "error"
+                item["error"] = err or msg_test
+                trabajo["procesadas"] = (trabajo.get("procesadas") or 0) + 1
+                trabajo["errores"] = (trabajo.get("errores") or 0) + 1
+                trabajo["mensaje"] = f"Error en {item['nombre']}: {item['error']}"
+            elif estado_test == "cancelado":
+                item["estado"] = "error"
+                item["error"] = "Detenido por usuario"
+
+    def on_log(nivel, msg, snap=None):
+        if nivel in ["error", "warn"]:
+            trabajo["mensaje"] = f"Test: {msg}"
+
+    res = ejecutar_test_job(
+        job_id=test_job_id,
+        usuario_prizma=usuario,
+        clave_prizma=contrasena,
+        user=trabajo.get("usuario_app", ""),
+        simulacion=False,
+        headless=True,
+        on_test_callback=on_test,
+        on_log_callback=on_log,
+        cancel_checker=lambda: bool(trabajo.get("cancelar_solicitado")),
+    )
+
+    trabajo["terminado"] = True
+    trabajo["etapa"] = "finalizado"
+    ex = trabajo.get("exitosas", 0)
+    er = trabajo.get("errores", 0)
+    trabajo["mensaje"] = f"Cargue completo finalizado. Exitosas: {ex}. Errores: {er}."
+
+
 def _ejecutar_cargue_en_hilo(trabajo_id):
     """Corre UN cargue completo. Cada cargue tiene su propio hilo y su
     propio navegador, asi que varios usuarios pueden cargar a la vez."""
@@ -2874,18 +2976,35 @@ def _ejecutar_cargue_en_hilo(trabajo_id):
         trabajo["terminado"] = False
 
     try:
-        ejecutar_cargue_con_historial(
-            trabajo["ruta_excel"],
-            trabajo["ruta_zip"],
-            trabajo["carpeta_temp"],
-            trabajo["ruta_reporte"],
-            trabajo["procesar_ovi"],
-            trabajo["procesar_ova"],
-            trabajo["procesar_retos"],
-            usuario,
-            contrasena,
-            trabajo,
+        tiene_recursos = (
+            bool(trabajo.get("procesar_ovi")) or
+            bool(trabajo.get("procesar_ova")) or
+            bool(trabajo.get("procesar_retos"))
         )
+        test_job_id = trabajo.get("test_job_id")
+
+        if tiene_recursos:
+            ejecutar_cargue_con_historial(
+                trabajo["ruta_excel"],
+                trabajo["ruta_zip"],
+                trabajo["carpeta_temp"],
+                trabajo["ruta_reporte"],
+                trabajo["procesar_ovi"],
+                trabajo["procesar_ova"],
+                trabajo["procesar_retos"],
+                usuario,
+                contrasena,
+                trabajo,
+            )
+
+        if test_job_id and not trabajo.get("cancelar_solicitado"):
+            msg_act = str(trabajo.get("mensaje", ""))
+            # Si hubo error fatal de login en los recursos, no intentamos el test
+            if tiene_recursos and ("ERROR_LOGIN_PRIZMA" in msg_act or "No fue posible iniciar sesión en PRIZMA" in msg_act):
+                pass
+            else:
+                _ejecutar_test_en_cargue(trabajo, test_job_id, usuario, contrasena)
+
     except Exception as exc:
         trabajo["etapa"] = "error"
         trabajo["mensaje"] = str(exc)
@@ -2937,6 +3056,40 @@ def _validar_origen_matriz(modo, google_sheet_url=None, nombre_archivo=None):
     if tiene_link:
         return False, "Usa una sola fuente de matriz: por link o por archivo."
     return True, ""
+
+
+def _parsear_datos_academicos(texto: str) -> dict | None:
+    """Parsea el campo único de datos académicos:
+    'codigo_programa - codigo_pensum - codigo_asignatura - nombre_asignatura'
+    Soporta separadores por espacios, guiones o combinaciones.
+    Los primeros 3 tokens corresponden a los códigos y el resto al nombre de la asignatura.
+    """
+    texto = (texto or "").strip()
+    if not texto:
+        return None
+
+    # Primero intentar separar por guiones explícitos (' - ' o '-')
+    partes_guion = [p.strip() for p in re.split(r"\s*[-–—]\s*", texto) if p.strip()]
+    if len(partes_guion) >= 4:
+        return {
+            "programa": partes_guion[0],
+            "pensum": partes_guion[1],
+            "codigo_asignatura": partes_guion[2],
+            "asignatura": " - ".join(partes_guion[3:]),
+        }
+
+    # Separación por espacios
+    tokens = texto.split()
+    if len(tokens) >= 4:
+        return {
+            "programa": tokens[0],
+            "pensum": tokens[1],
+            "codigo_asignatura": tokens[2],
+            "asignatura": " ".join(tokens[3:]),
+        }
+
+    return None
+
 
 
 def _extension_matriz_archivo(nombre_archivo):
@@ -3684,6 +3837,109 @@ def generar_html(
                     <strong>Retos Evaluativos</strong>
                     <small>Retos evaluativos en PDF</small>
                 </label>
+
+                <label class="tarjeta-tipo tipo-naranja">
+                    <input type="checkbox" name="test_evaluativo" value="1" id="chk-test">
+                    <span class="check-personalizado">✓</span>
+                    <span class="tipo-icono icono-test" aria-hidden="true">
+                        <svg viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg>
+                    </span>
+                    <strong>Test Evaluativo</strong>
+                    <small>Exámenes desde Word / Google Docs</small>
+                </label>
+            </div>
+
+            <div id="bloque-test" style="display:none;margin-top:10px;">
+                <div class="separador"></div>
+                <div class="titulo-seccion">
+                    <span class="numero-seccion" style="background:#fef3c7;color:#d97706;">3</span>
+                    <div>
+                        <h2>Documento de Test y Datos Académicos</h2>
+                        <p>Sube el archivo Word o pega el enlace de Google Docs, e indica los datos académicos del curso.</p>
+                    </div>
+                </div>
+
+                <div class="selector-modo-matriz" style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
+                    <label style="flex:1;min-width:180px;border:1px solid #fde68a;border-radius:12px;padding:12px 14px;cursor:pointer;background:#fffdf5;">
+                        <input type="radio" name="modo_test" value="archivo" checked>
+                        <strong style="margin-left:7px;">📄 Por archivo Word</strong>
+                        <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Documento .docx</span>
+                    </label>
+                    <label style="flex:1;min-width:180px;border:1px solid #e5e7ef;border-radius:12px;padding:12px 14px;cursor:pointer;">
+                        <input type="radio" name="modo_test" value="link">
+                        <strong style="margin-left:7px;">🔗 Por link Google Docs</strong>
+                        <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Enlace del examen</span>
+                    </label>
+                </div>
+
+                <div class="grid-archivos" style="grid-template-columns:1fr;margin-bottom:18px;">
+                    <label class="tarjeta-archivo zona-drop" id="bloque-test-archivo" for="archivo-test-docx" data-input="archivo-test-docx">
+                        <div class="archivo-cabecera">
+                            <div class="archivo-icono" style="background:#fef3c7;color:#d97706;" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                            </div>
+                            <div>
+                                <strong>Documento de evaluación (.docx)</strong>
+                                <span>Arrastra o selecciona el archivo Word con las preguntas</span>
+                            </div>
+                        </div>
+                        <div class="selector-archivo">
+                            <span class="boton-selector" style="background:#d97706;">Seleccionar archivo</span>
+                            <span id="nombre-test-docx" class="nombre-archivo">Ningún archivo seleccionado</span>
+                        </div>
+                        <input id="archivo-test-docx" type="file" name="test_archivo_docx" accept=".docx" disabled>
+                    </label>
+
+                    <div class="tarjeta-archivo" id="bloque-test-link" style="display:none;">
+                        <div class="archivo-cabecera">
+                            <div class="archivo-icono" style="background:#fef3c7;color:#d97706;" aria-hidden="true">
+                                <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                            </div>
+                            <div>
+                                <strong>Google Docs del examen</strong>
+                                <span>Pega el enlace del documento de Google con las preguntas</span>
+                            </div>
+                        </div>
+                        <div class="selector-archivo">
+                            <input id="test-google-doc-url" type="url" name="test_google_doc_url" placeholder="https://docs.google.com/document/d/..." autocomplete="off" disabled style="display:block;width:100%;border:0;outline:0;background:transparent;color:#101828;font:inherit;font-size:12px;">
+                        </div>
+                    </div>
+                </div>
+
+                <div style="background:#f8f9fc;border:1px solid #eaecf0;border-radius:12px;padding:16px;margin-bottom:18px;">
+                    <div style="margin-bottom:14px;">
+                        <label for="test-datos-academicos" style="font-weight:700;font-size:14px;color:#344054;margin-bottom:6px;display:block;">
+                            Datos académicos (Código Programa · Código Pensum · Código Asignatura · Nombre Asignatura)
+                        </label>
+                        <input id="test-datos-academicos" name="test_datos_academicos" type="text"
+                               placeholder="Ej: ADM101 PEN2024 MAC001 Macroeconomía Aplicada"
+                               autocomplete="off" disabled
+                               style="width:100%;box-sizing:border-box;padding:12px 14px;border:1px solid #d5d1fc;border-radius:10px;font-size:13px;color:#101828;background:#fff;">
+                        <small style="color:#667085;margin-top:5px;display:block;font-size:12px;">
+                            Ingresa los 3 códigos seguidos del nombre de la asignatura, separados por espacio o guión.
+                        </small>
+                    </div>
+
+                    <div>
+                        <label for="test-semestre" style="font-weight:700;font-size:14px;color:#344054;margin-bottom:6px;display:block;">
+                            Semestre / Nivel de pensum
+                        </label>
+                        <select id="test-semestre" name="test_semestre" disabled
+                                style="width:100%;max-width:260px;box-sizing:border-box;padding:11px 14px;border:1px solid #d5d1fc;border-radius:10px;font-size:13px;color:#101828;background:#fff;cursor:pointer;">
+                            <option value="">Selecciona el semestre...</option>
+                            <option value="1">Semestre 1</option>
+                            <option value="2">Semestre 2</option>
+                            <option value="3">Semestre 3</option>
+                            <option value="4">Semestre 4</option>
+                            <option value="5">Semestre 5</option>
+                            <option value="6">Semestre 6</option>
+                            <option value="7">Semestre 7</option>
+                            <option value="8">Semestre 8</option>
+                            <option value="9">Semestre 9</option>
+                            <option value="10">Semestre 10</option>
+                        </select>
+                    </div>
+                </div>
             </div>
 
             <button class="boton-principal" type="submit">
@@ -3924,6 +4180,32 @@ def generar_html(
             encabezado_recurso = "Archivo Drive"
             encabezado_estado = "Estado ZIP"
 
+        bloque_test_html = ""
+        test_info = resultado.get("test_info")
+        if test_info:
+            test_job_id = test_info.get("test_job_id", "")
+            cant_tests = test_info.get("cantidad_tests", 1)
+            cant_preg = test_info.get("cantidad_preguntas", 0)
+            nom_doc = test_info.get("nombre_documento", "documento.docx")
+            bloque_test_html = f"""
+            <div class="panel" style="margin-bottom:20px;border:2px solid #f59e0b;background:#fffdf5;border-radius:16px;padding:22px;">
+                <div style="display:flex;gap:14px;align-items:flex-start;">
+                    <div style="width:44px;height:44px;border-radius:12px;background:#fef3c7;color:#d97706;display:grid;place-items:center;font-size:24px;flex-shrink:0;">📝</div>
+                    <div style="flex:1;">
+                        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+                            <div>
+                                <h3 style="margin:0 0 4px;color:#92400e;font-size:18px;font-weight:800;">Test Evaluativo Preparado</h3>
+                                <p style="margin:0;color:#78350f;font-size:13px;">Documento: <strong>{e(nom_doc)}</strong> · {cant_tests} examen(es) con {cant_preg} preguntas detectadas.</p>
+                            </div>
+                            <a href="/tests/{test_job_id}/revision" class="boton-selector" style="background:#d97706;padding:11px 20px;font-size:13px;text-decoration:none;display:inline-flex;align-items:center;gap:6px;border-radius:8px;">
+                                Revisar y Configurar Test ➔
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            """
+
         contenido = f"""
         <section id="cargue-principal" class="encabezado-exito panel">
             <div class="check-grande">✓</div>
@@ -3942,6 +4224,7 @@ def generar_html(
             <div class="resumen-card rojo"><span>PDF</span><strong>{total_pdf}</strong></div>
         </section>
 
+        {bloque_test_html}
         {bloque_advertencias_revision}
         {bloque_error_revision}
 
@@ -4279,7 +4562,7 @@ def generar_html(
             .nombre-archivo { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 1 auto; display: block; }
 
             .separador { height: 1px; background: var(--borde); margin: 26px 0; }
-            .grid-tipos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+            .grid-tipos { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
             .tarjeta-tipo {
                 position: relative; border: 1px solid var(--borde); border-radius: 14px; padding: 18px;
                 min-height: 125px; cursor: pointer; transition: .18s ease; display: flex; flex-direction: column;
@@ -4297,11 +4580,14 @@ def generar_html(
             .tarjeta-tipo:has(input:checked).tipo-azul .check-personalizado { background: #1976d2; }
             .tarjeta-tipo:has(input:checked).tipo-morado { border-color: #b9a8f5; background: #fdfcff; }
             .tarjeta-tipo:has(input:checked).tipo-morado .check-personalizado { background: #8b5cf6; }
+            .tarjeta-tipo:has(input:checked).tipo-naranja { border-color: #f59e0b; background: #fffdf5; }
+            .tarjeta-tipo:has(input:checked).tipo-naranja .check-personalizado { background: #d97706; }
             .tipo-icono { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 15px; }
             .tipo-icono svg { width: 25px; height: 25px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
             .icono-ovi { color:#079455; background:#e9f9f1; }
             .icono-ova { color:#1976d2; background:#eaf4ff; }
             .icono-reto { color:#7f56d9; background:#f1ebff; }
+            .icono-test { color:#d97706; background:#fef3c7; }
             .tarjeta-tipo strong { font-size: 16px; }
             .tarjeta-tipo small { color: var(--muted); margin-top: 6px; line-height: 1.4; }
 
@@ -4424,6 +4710,7 @@ def generar_html(
 
                 <nav class="nav">
                     <a class="nav-item activo" href="/">⌂ <span>Inicio</span></a>
+                    <a class="nav-item" href="/tests">▣ <span>Test</span></a>
                     <a class="nav-item" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
                     <a class="nav-item" href="/historial">◷ <span>Historial</span></a>
                     <a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a>
@@ -4540,6 +4827,77 @@ def generar_html(
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 });
             });
+
+            // Gestión interactiva del apartado Test Evaluativo
+            const chkTest = document.getElementById('chk-test');
+            const bloqueTest = document.getElementById('bloque-test');
+            const testDocx = document.getElementById('archivo-test-docx');
+            const testUrl = document.getElementById('test-google-doc-url');
+            const testDatos = document.getElementById('test-datos-academicos');
+            const testSemestre = document.getElementById('test-semestre');
+            const radiosTest = document.querySelectorAll('input[name="modo_test"]');
+
+            function aplicarModoTest() {
+                const sel = document.querySelector('input[name="modo_test"]:checked');
+                const esArchivo = !sel || sel.value === 'archivo';
+                const bloqueTestArchivo = document.getElementById('bloque-test-archivo');
+                const bloqueTestLink = document.getElementById('bloque-test-link');
+                const activo = chkTest && chkTest.checked;
+
+                if (bloqueTestArchivo) bloqueTestArchivo.style.display = esArchivo ? '' : 'none';
+                if (bloqueTestLink) bloqueTestLink.style.display = esArchivo ? 'none' : '';
+
+                if (testDocx) {
+                    testDocx.disabled = !activo || !esArchivo;
+                    testDocx.required = activo && esArchivo;
+                }
+                if (testUrl) {
+                    testUrl.disabled = !activo || esArchivo;
+                    testUrl.required = activo && !esArchivo;
+                }
+            }
+
+            function toggleTest() {
+                const activo = chkTest && chkTest.checked;
+                if (bloqueTest) bloqueTest.style.display = activo ? '' : 'none';
+                if (testDatos) {
+                    testDatos.disabled = !activo;
+                    testDatos.required = activo;
+                }
+                if (testSemestre) {
+                    testSemestre.disabled = !activo;
+                    testSemestre.required = activo;
+                }
+                aplicarModoTest();
+                ajustarRequeridosGenerales();
+            }
+
+            function ajustarRequeridosGenerales() {
+                const chkOvi = document.querySelector('input[name="ovi"]');
+                const chkOva = document.querySelector('input[name="ova"]');
+                const chkRetos = document.querySelector('input[name="retos"]');
+                const tieneRecursos = (chkOvi && chkOvi.checked) || (chkOva && chkOva.checked) || (chkRetos && chkRetos.checked);
+
+                if (zip) {
+                    zip.required = tieneRecursos;
+                }
+                const selModo = document.querySelector('input[name="modo_matriz"]:checked');
+                const esArchivo = selModo ? selModo.value === 'archivo' : false;
+                if (googleUrl) {
+                    googleUrl.required = tieneRecursos && !esArchivo;
+                }
+                if (matriz) {
+                    matriz.required = tieneRecursos && esArchivo;
+                }
+            }
+
+            if (chkTest) chkTest.addEventListener('change', toggleTest);
+            radiosTest.forEach(r => r.addEventListener('change', aplicarModoTest));
+            if (testDocx) testDocx.addEventListener('change', () => actualizarNombre(testDocx, 'nombre-test-docx'));
+            document.querySelectorAll('input[name="ovi"], input[name="ova"], input[name="retos"]').forEach(cb => {
+                cb.addEventListener('change', ajustarRequeridosGenerales);
+            });
+            toggleTest();
         </script>
     </body>
     </html>
@@ -4831,6 +5189,7 @@ async def exigir_sesion(request: FastAPIRequest, call_next):
         return RedirectResponse("/login", status_code=303)
 
     testigo = USUARIO_ACTUAL.set(usuario)
+    request.state.usuario = usuario
 
     try:
         return await call_next(request)
@@ -5186,16 +5545,81 @@ def inicio():
     response_class=HTMLResponse,
 )
 async def analizar(
-    recursos: UploadFile = File(...),
+    request: FastAPIRequest,
+    recursos: UploadFile | None = File(default=None),
     modo_matriz: str = Form(default="link"),
     google_sheet_url: str | None = Form(default=None),
     matriz_archivo: UploadFile | None = File(default=None),
     ovi: str | None = Form(default=None),
     ova: str | None = Form(default=None),
     retos: str | None = Form(default=None),
+    test_evaluativo: str | None = Form(default=None),
+    test_archivo_docx: UploadFile | None = File(default=None),
+    test_google_doc_url: str | None = Form(default=None),
+    modo_test: str = Form(default="archivo"),
+    test_datos_academicos: str | None = Form(default=None),
+    test_semestre: str | None = Form(default=None),
 ):
 
     try:
+        procesar_ovi = ovi is not None
+        procesar_ova = ova is not None
+        procesar_retos = retos is not None
+        procesar_test = test_evaluativo is not None
+        procesar_recursos = procesar_ovi or procesar_ova or procesar_retos
+
+        if not procesar_recursos and not procesar_test:
+            return generar_html(
+                error="Selecciona al menos una categoría: OVI, OVA, Retos Evaluativos o Test Evaluativo."
+            )
+
+        test_job_id = None
+        nom_test = ""
+        document_test = None
+        if procesar_test:
+            datos_acad = _parsear_datos_academicos(test_datos_academicos)
+            if not datos_acad:
+                return generar_html(
+                    error="Debes ingresar los datos académicos en el formato: CódigoPrograma CódigoPensum CódigoAsignatura NombreAsignatura"
+                )
+            semestre_val = str(test_semestre or "").strip()
+            if not semestre_val:
+                return generar_html(
+                    error="Debes seleccionar el semestre para el test evaluativo."
+                )
+
+            from test_module.web import _extraer_bytes_docx_request, _JOBS, _JOBS_LOCK
+            from test_module.parser import parse_docx_bytes
+
+            content_test, nom_test, err_test = await _extraer_bytes_docx_request(
+                request, test_archivo_docx, test_google_doc_url, modo_test
+            )
+            if err_test or not content_test:
+                return generar_html(error=err_test or "El documento de test está vacío.")
+
+            try:
+                document_test = parse_docx_bytes(content_test, source_name=nom_test)
+            except Exception as exc_p:
+                return generar_html(error=f"Error al procesar documento de test: {exc_p}")
+
+            test_job_id = uuid.uuid4().hex
+            with _JOBS_LOCK:
+                _JOBS[test_job_id] = {
+                    "owner": _usuario_actual(),
+                    "document": document_test,
+                    "created_at": _ahora_colombia_iso(),
+                    "cascada_datos": {
+                        "programa": datos_acad["programa"],
+                        "pensum": datos_acad["pensum"],
+                        "nivel": semestre_val,
+                        "asignatura": datos_acad["asignatura"],
+                        "codigo_asignatura": datos_acad["codigo_asignatura"],
+                    },
+                }
+
+            if not procesar_recursos:
+                return RedirectResponse(f"/tests/{test_job_id}/revision", status_code=303)
+
         nombre_archivo_matriz = (
             str(getattr(matriz_archivo, "filename", "") or "").strip()
             if matriz_archivo is not None
@@ -5211,18 +5635,9 @@ async def analizar(
         if not origen_ok:
             return generar_html(error=error_origen)
 
-        if not str(recursos.filename or "").lower().endswith(".zip"):
+        if not recursos or not str(recursos.filename or "").lower().endswith(".zip"):
             return generar_html(
                 error="Los recursos deben estar en un archivo .zip"
-            )
-
-        procesar_ovi = ovi is not None
-        procesar_ova = ova is not None
-        procesar_retos = retos is not None
-
-        if not procesar_ovi and not procesar_ova and not procesar_retos:
-            return generar_html(
-                error="Selecciona OVI, OVA y/o Retos Evaluativos."
             )
 
         if modo_matriz == "link":
@@ -5386,6 +5801,15 @@ async def analizar(
             "nombre_matriz": nombre_matriz,
         }
 
+        if procesar_test and test_job_id and document_test:
+            resultado["test_info"] = {
+                "test_job_id": test_job_id,
+                "nombre_documento": nom_test,
+                "cantidad_tests": len(document_test.tests),
+                "cantidad_preguntas": sum(len(sec.questions) for t in document_test.tests for sec in t.sections),
+            }
+            TRABAJOS[trabajo_id]["test_job_id"] = test_job_id
+
         TRABAJOS[trabajo_id]["resultado_analisis"] = resultado
 
         return generar_html(
@@ -5532,6 +5956,7 @@ def iniciar_trabajo(
                 </div>
                 <nav class="nav">
                     <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
+                    <a class="nav-item" href="/tests">▣ <span>Test</span></a>
                     <a class="nav-item activo" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
                     <a class="nav-item" href="/historial">◷ <span>Historial</span></a>
                     <a class="nav-item" href="/reportes">▥ <span>Reportes</span></a><a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a><a class="nav-item" href="/salir">⏻ <span>Salir</span></a>
@@ -6084,6 +6509,7 @@ def _pagina_registros(tipo="historial"):
         <div class="marca"><div class="logo"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M9 35.5 20.5 8.5c.8-1.9 3.4-1.9 4.2 0l4.1 9.6-5.4 12.7-3.1-7.4-5.2 12.1z"/><path d="M26.4 14.5 39 35.5h-8.2l-8.5-14.2z"/></svg></div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div>
         <nav class="nav">
             <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
+            <a class="nav-item" href="/tests">▣ <span>Test</span></a>
             <a class="nav-item" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
             <a class="nav-item __ACTIVO_HISTORIAL__" href="/historial">◷ <span>Historial</span></a>
             <a class="nav-item __ACTIVO_REPORTES__" href="/reportes">▥ <span>Reportes</span></a>
@@ -6419,3 +6845,15 @@ def descargar_reporte(
         ruta,
         "/reporte/" + trabajo_id + "?descargar=1",
     ))
+
+# ============================================================
+# MODULO TESTS
+# ============================================================
+
+from test_module.web import router as test_module_router
+
+app.state.test_google_loader = _descargar_google_docx_para_tests
+app.state.trabajos_cargue = TRABAJOS
+app.state.historial_cargues = _historial_del_usuario
+app.state.resultados_dir = RESULTADOS_DIR
+app.include_router(test_module_router)
