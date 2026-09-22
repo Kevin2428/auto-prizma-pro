@@ -66,7 +66,7 @@ def resolver_variantes_numericas(texto: str | None) -> list[str]:
 class PrizmaTestAutomator:
     def __init__(
         self,
-        base_url: str = "https://admin.prizma.solutions",
+        base_url: str = "https://admin.prizma.site",
         headless: bool = True,
         log_callback: Callable[[str, str, str | None], None] | None = None,
     ):
