@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
+import motor_prizma
+
 from .automation import PrizmaTestAutomator
 from .models import Severity, TestDocument, document_from_dict, document_to_dict
 from .parser import parse_docx_bytes
@@ -207,7 +209,140 @@ button.secundario,.boton.secundario{{background:#fff;color:#5548e8;border:1px so
 .muted{{color:var(--muted);font-size:12px}}
 @media(max-width:1100px){{.layout-tests{{grid-template-columns:1fr}}.panel-ayuda{{order:2}}}}
 @media(max-width:900px){{.app{{grid-template-columns:1fr}}.sidebar{{display:none}}.contenido{{padding:20px}}.grid2{{grid-template-columns:1fr}}}}
-</style></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo">A</div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav">{nav}</nav></aside><main class="contenido">{body}</main></div></body></html>'''
+.estado-servicio{{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}}
+.servicio-linea{{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}}
+.punto{{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}}
+.servicio-mini{{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}}
+.chip{{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}}
+html[data-theme="dark"] .test-card,
+html[data-theme="dark"] .panel-ayuda,
+html[data-theme="dark"] .question,
+html[data-theme="dark"] .dropzone {{
+  background: #111827 !important;
+  color: #e5e7eb !important;
+  border-color: #263244 !important;
+}}
+html[data-theme="dark"] .question.question-error {{
+  background: #2a1a1a !important;
+  border-color: #f04438 !important;
+}}
+html[data-theme="dark"] .section {{ border-left-color: #6d5dfc !important; }}
+html[data-theme="dark"] .titulo-consejos,
+html[data-theme="dark"] .paso-ayuda,
+html[data-theme="dark"] .consejo,
+html[data-theme="dark"] .muted {{ color: #aeb9ca !important; }}
+html[data-theme="dark"] .ayuda-separador {{ background: #263244 !important; }}
+html[data-theme="dark"] .issue.error {{ background: #2a1a1a !important; border-color: #633 !important; }}
+html[data-theme="dark"] .issue.warning {{ background: #2a2210 !important; border-color: #7a5c00 !important; }}
+html[data-theme="dark"] .issue.ok {{ background: #103322 !important; border-color: #0a5c3a !important; }}
+html[data-theme="dark"] .badge.ok {{ background: #103322 !important; }}
+html[data-theme="dark"] .badge.warn {{ background: #2a2210 !important; }}
+html[data-theme="dark"] .badge.error {{ background: #2a1a1a !important; }}
+
+/* ---- Estados dinamicos reutilizables (banners, kpis, badges, tarjeta en vivo) ---- */
+.status-banner{{display:flex;gap:14px;align-items:flex-start;margin-bottom:20px;border-radius:14px;padding:20px;border:2px solid transparent;box-shadow:0 4px 12px rgba(0,0,0,.06)}}
+.status-banner .status-icon{{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;font-size:22px;font-weight:900;flex-shrink:0}}
+.status-banner h3{{margin:0 0 6px;font-size:17px;font-weight:800}}
+.status-banner p{{margin:0 0 12px;font-size:14px;line-height:1.5}}
+.status-banner .acciones{{margin-top:0}}
+.status-banner--ok{{background:#f6fef9;border-color:#a6f4c5}}
+.status-banner--ok .status-icon{{background:#d1fadf;color:#027a48}}
+.status-banner--ok h3,.status-banner--ok p{{color:#027a48}}
+.status-banner--error{{background:#fffbfa;border-color:#fecdca}}
+.status-banner--error .status-icon{{background:#fee4e2;color:#d92d20}}
+.status-banner--error h3{{color:#b42318}}
+.status-banner--error p{{color:#7a271a}}
+.status-banner--warn{{background:#fffcf5;border-color:#fedf89}}
+.status-banner--warn .status-icon{{background:#fef0c7;color:#b54708}}
+.status-banner--warn h3{{color:#92400e}}
+.status-banner--warn p{{color:#78350f}}
+
+.kpi-card{{background:#fff;border:1px solid var(--borde);border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(16,24,40,.05)}}
+.kpi-card .kpi-label{{font-size:12px;font-weight:700;text-transform:uppercase;color:var(--muted)}}
+.kpi-card .kpi-valor{{font-size:28px;font-weight:900;margin-top:4px;color:var(--texto)}}
+.kpi-card--ok{{background:#f6fef9;border-color:#a6f4c5}}
+.kpi-card--ok .kpi-label,.kpi-card--ok .kpi-valor{{color:#027a48}}
+.kpi-card--warn{{background:#fffcf5;border-color:#fedf89}}
+.kpi-card--warn .kpi-label,.kpi-card--warn .kpi-valor{{color:#b54708}}
+.kpi-card--error{{background:#fffbfa;border-color:#fecdca}}
+.kpi-card--error .kpi-label,.kpi-card--error .kpi-valor{{color:#b42318}}
+
+.badge-dinamico{{display:inline-block;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:800}}
+.badge-dinamico--pendiente{{background:#f2f4f7;color:#344054}}
+.badge-dinamico--proceso{{background:#fef0c7;color:#b54708}}
+.badge-dinamico--ok{{background:#ecfdf3;color:#087f5b}}
+.badge-dinamico--error{{background:#fef3f2;color:#b42318}}
+.badge-dinamico--detenido{{background:#e5e7eb;color:#374151}}
+
+.live-card{{border-radius:16px;padding:20px 24px;box-shadow:0 4px 14px rgba(0,0,0,.04);border:2px solid transparent;margin-bottom:24px;transition:all .3s ease}}
+.live-card--running{{background:#fbfaff;border-color:#6366f1}}
+.live-card--waiting{{background:#fef2f2;border-color:#ef4444}}
+.live-card h3{{margin:0;font-size:16px;font-weight:800;color:var(--texto)}}
+.live-card p{{margin:3px 0 0;font-size:13px;color:var(--muted)}}
+
+.progress-track{{background:#e2e8f0;border-radius:999px;height:9px;overflow:hidden}}
+.progress-fill{{background:linear-gradient(90deg,#5548e8,#818cf8);height:100%;transition:width .4s ease}}
+
+.mode-option{{flex:1;min-width:180px;border:1px solid var(--borde);border-radius:12px;padding:14px;cursor:pointer;background:#fff;transition:all .2s}}
+.mode-option strong{{margin-left:7px;font-size:14px}}
+.mode-option span{{display:block;margin:5px 0 0 25px;color:var(--muted);font-size:12px}}
+.mode-option--activo{{border-color:#5548e8;background:#f8f7ff}}
+
+.alert-soft{{margin-top:14px;border-radius:12px;padding:14px;display:flex;gap:12px;align-items:center}}
+.alert-soft--ok{{background:#ecfdf3;border:1px solid #a6f4c5;color:#027a48}}
+.alert-soft--warn{{background:#fff8df;border:1px solid #f5c451;color:#7a4b00;align-items:flex-start}}
+.alert-soft a{{color:#4f46e5;font-weight:700}}
+
+.test-card-header{{background:#f8f9fc;border-bottom:1px solid #edeafc}}
+.chip-morado{{display:inline-block;font-size:12px;background:#edeafc;padding:3px 8px;border-radius:6px;color:#4338ca;font-weight:600}}
+
+#btn-guardar-correcciones.is-dirty{{background:#e11d48 !important;color:#fff !important;font-weight:800;box-shadow:0 0 0 4px rgba(225,29,72,.35)}}
+
+html[data-theme="dark"] .status-banner--ok{{background:#0b2318 !important;border-color:#0a5c3a !important}}
+html[data-theme="dark"] .status-banner--ok h3,html[data-theme="dark"] .status-banner--ok p{{color:#86efac !important}}
+html[data-theme="dark"] .status-banner--error{{background:#2a1a1a !important;border-color:#633 !important}}
+html[data-theme="dark"] .status-banner--error h3{{color:#fca5a5 !important}}
+html[data-theme="dark"] .status-banner--error p{{color:#fecaca !important}}
+html[data-theme="dark"] .status-banner--warn{{background:#2a2210 !important;border-color:#7a5c00 !important}}
+html[data-theme="dark"] .status-banner--warn h3{{color:#fbbf24 !important}}
+html[data-theme="dark"] .status-banner--warn p{{color:#fde68a !important}}
+
+html[data-theme="dark"] .kpi-card{{background:#111827 !important;border-color:#263244 !important}}
+html[data-theme="dark"] .kpi-card .kpi-label{{color:#aeb9ca !important}}
+html[data-theme="dark"] .kpi-card .kpi-valor{{color:#f3f4f6 !important}}
+html[data-theme="dark"] .kpi-card--ok{{background:#0b2318 !important;border-color:#0a5c3a !important}}
+html[data-theme="dark"] .kpi-card--ok .kpi-label,html[data-theme="dark"] .kpi-card--ok .kpi-valor{{color:#4ade80 !important}}
+html[data-theme="dark"] .kpi-card--warn{{background:#2a2210 !important;border-color:#7a5c00 !important}}
+html[data-theme="dark"] .kpi-card--warn .kpi-label,html[data-theme="dark"] .kpi-card--warn .kpi-valor{{color:#fbbf24 !important}}
+html[data-theme="dark"] .kpi-card--error{{background:#2a1a1a !important;border-color:#633 !important}}
+html[data-theme="dark"] .kpi-card--error .kpi-label,html[data-theme="dark"] .kpi-card--error .kpi-valor{{color:#fca5a5 !important}}
+
+html[data-theme="dark"] .badge-dinamico--pendiente{{background:#1f2937 !important;color:#cbd5e1 !important}}
+html[data-theme="dark"] .badge-dinamico--proceso{{background:#2a2210 !important;color:#fbbf24 !important}}
+html[data-theme="dark"] .badge-dinamico--ok{{background:#0b2318 !important;color:#4ade80 !important}}
+html[data-theme="dark"] .badge-dinamico--error{{background:#2a1a1a !important;color:#fca5a5 !important}}
+html[data-theme="dark"] .badge-dinamico--detenido{{background:#263244 !important;color:#cbd5e1 !important}}
+
+html[data-theme="dark"] .live-card--running{{background:#111827 !important;border-color:#6d5dfc !important}}
+html[data-theme="dark"] .live-card--waiting{{background:#2a1a1a !important;border-color:#ef4444 !important}}
+
+html[data-theme="dark"] .mode-option{{background:#111827 !important;border-color:#263244 !important;color:#e5e7eb !important}}
+html[data-theme="dark"] .mode-option span{{color:#aeb9ca !important}}
+html[data-theme="dark"] .mode-option--activo{{background:#1d2540 !important;border-color:#818cf8 !important}}
+
+html[data-theme="dark"] .alert-soft--ok{{background:#0b2318 !important;border-color:#0a5c3a !important;color:#86efac !important}}
+html[data-theme="dark"] .alert-soft--warn{{background:#2a2210 !important;border-color:#7a5c00 !important;color:#fde68a !important}}
+html[data-theme="dark"] .alert-soft a{{color:#a5b4fc !important}}
+
+html[data-theme="dark"] .progress-track{{background:#1f2937 !important}}
+
+html[data-theme="dark"] .test-card-header{{background:#0f172a !important;border-bottom-color:#263244 !important}}
+html[data-theme="dark"] .chip-morado{{background:#1d2540 !important;color:#a5b4fc !important}}
+html[data-theme="dark"] button.secundario,
+html[data-theme="dark"] .boton.secundario{{background:#111827 !important;color:#a5b4fc !important;border-color:#334155 !important}}
+.boton.secundario.peligro{{border-color:#fda29b;color:#b42318}}
+html[data-theme="dark"] .boton.secundario.peligro{{background:#2a1a1a !important;color:#fca5a5 !important;border-color:#7a3b3b !important}}
+</style><link rel="stylesheet" href="/estilos-responsive.css"><script src="/tema.js" defer></script></head><body><div class="app"><aside class="sidebar"><div class="marca"><div class="logo">A</div><div><strong>Auto Prizma Pro</strong><span>Automatización PRIZMA</span></div></div><nav class="nav">{nav}</nav><div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div></aside><main class="contenido">{body}</main></div></body></html>'''
 
 
 def _render_issues(issues) -> str:
@@ -304,12 +439,12 @@ def _render_review(job_id: str, job: dict, message: str = "") -> str:
                 )
             sections.append(f'<div class="section"><h3>{html.escape(section.name)} ({len(section.questions)} pregunta{"s" if len(section.questions)!=1 else ""})</h3>{"".join(questions)}</div>')
         num_preguntas_test = sum(len(sec.questions) for sec in test.sections)
-        cards.append(f'''<article class="test-card" id="test-card-{test_index}" style="margin-bottom:16px;border:1px solid #e0e2ec;border-radius:14px;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,0.03);background:#fff;">
-            <div class="test-card-header" onclick="toggleTestCard({test_index})" style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;background:#f8f9fc;cursor:pointer;user-select:none;border-bottom:1px solid #edeafc;">
+        cards.append(f'''<article class="test-card" id="test-card-{test_index}" style="margin-bottom:16px;padding:0;overflow:hidden;">
+            <div class="test-card-header" onclick="toggleTestCard({test_index})" style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;cursor:pointer;user-select:none;">
                 <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
                     <span class="badge ok" style="font-weight:700;">Test {test_index + 1} de {len(document.tests)}</span>
-                    <strong style="font-size:15px;color:#1e293b;">{html.escape(test.title or f"Evaluación {test_index + 1}")}</strong>
-                    <span class="muted" style="font-size:12px;background:#edeafc;padding:3px 8px;border-radius:6px;color:#4338ca;font-weight:600;">{num_preguntas_test} pregunta{'s' if num_preguntas_test != 1 else ''}</span>
+                    <strong style="font-size:15px;">{html.escape(test.title or f"Evaluación {test_index + 1}")}</strong>
+                    <span class="chip-morado">{num_preguntas_test} pregunta{'s' if num_preguntas_test != 1 else ''}</span>
                     <span class="muted" style="font-size:12px;">Semana {html.escape(test.week or "N/A")} | Corte {html.escape(test.cut or "N/A")}</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:8px;">
@@ -344,7 +479,7 @@ def _render_review(job_id: str, job: dict, message: str = "") -> str:
                 <span class="badge ok" id="badge-sin-errores" style="{ok_badge_style}">✓ Todas las preguntas y claves validadas</span>
                 <span class="badge {'warn' if counts['warning'] else 'ok'}">{counts['warning']} advertencia(s)</span>
             </div>
-            <a href="#bloque-acceso-prizma" class="btn" style="background:#4338ca;color:#fff;text-decoration:none;padding:8px 16px;border-radius:8px;font-weight:700;font-size:13px;display:inline-flex;align-items:center;gap:6px;box-shadow:0 2px 6px rgba(67,56,202,0.25);">
+            <a href="#bloque-acceso-prizma" class="boton" style="text-decoration:none;padding:8px 16px;font-size:13px;">
                 ⚡ Ir a Carga en PRIZMA ↓
             </a>
         </div>
@@ -366,12 +501,12 @@ def _render_review(job_id: str, job: dict, message: str = "") -> str:
         </div>
     </form>
 
-    <section id="bloque-acceso-prizma" class="panel" style="margin-top:28px;border:2px solid #5548e8;background:#faf9ff;border-radius:16px;scroll-margin-top:24px;">
+    <section id="bloque-acceso-prizma" class="panel" style="margin-top:28px;border:2px solid var(--morado);background:#faf9ff;scroll-margin-top:24px;">
         <div style="display:flex;align-items:center;gap:14px;margin-bottom:16px;">
-            <div style="width:42px;height:42px;border-radius:12px;background:#5548e8;color:#fff;display:grid;place-items:center;font-size:22px;">🛡</div>
+            <div style="width:42px;height:42px;border-radius:12px;background:var(--morado);color:#fff;display:grid;place-items:center;font-size:22px;flex-shrink:0;">🛡</div>
             <div>
-                <h2 style="margin:0;font-size:20px;color:#1d2939;">Fase 3: Publicación y Carga en PRIZMA</h2>
-                <p style="margin:3px 0 0;font-size:13px;color:#667085;">Automatización con Playwright en tiempo real contra <strong>admin.prizma.solutions</strong></p>
+                <h2 style="margin:0;font-size:20px;">Fase 3: Publicación y Carga en PRIZMA</h2>
+                <p style="margin:3px 0 0;font-size:13px;">Automatización con Playwright en tiempo real contra <strong>admin.prizma.site</strong></p>
             </div>
         </div>
 
@@ -388,17 +523,17 @@ def _render_review(job_id: str, job: dict, message: str = "") -> str:
             </div>
 
             <div style="display:flex;gap:18px;margin:14px 0 18px;flex-wrap:wrap;align-items:center;">
-                <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;font-size:13px;color:#344054;">
+                <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:600;font-size:13px;">
                     <input type="checkbox" name="recordar_credenciales" value="1" style="width:auto;" {"checked" if creds.get("recordar", True) else ""}>
                     Recordar usuario en este equipo
                 </label>
             </div>
 
-            <div style="border-top:1px dashed #d5d1fc;padding-top:16px;margin-top:10px;">
-                <h3 style="margin:0 0 12px;font-size:15px;color:#344054;">Parámetros del Curso en PRIZMA (Selectores en Cascada)</h3>
+            <div style="border-top:1px dashed var(--borde);padding-top:16px;margin-top:10px;">
+                <h3 style="margin:0 0 12px;font-size:15px;">Parámetros del Curso en PRIZMA (Selectores en Cascada)</h3>
                 <div class="grid2">
                     <div>
-                        <label>Facultad <small style="color:#667085;font-weight:normal;">(Opcional)</small></label>
+                        <label>Facultad <small style="font-weight:normal;">(Opcional)</small></label>
                         <input name="cascada_facultad" placeholder="Opcional - Facultad institucional (ej. Virtual - Derecho)" value="{html.escape(cascada_facultad_val)}">
                     </div>
                     <div>
@@ -590,10 +725,7 @@ def _render_review(job_id: str, job: dict, message: str = "") -> str:
         const btn = document.getElementById('btn-guardar-correcciones');
         if (btn && !btn.dataset.dirty) {{
             btn.dataset.dirty = 'true';
-            btn.style.background = '#e11d48';
-            btn.style.color = '#ffffff';
-            btn.style.fontWeight = '800';
-            btn.style.boxShadow = '0 0 0 4px rgba(225, 29, 72, 0.35)';
+            btn.classList.add('is-dirty');
             btn.innerHTML = '💾 Guardar correcciones * (Cambios pendientes)';
         }}
     }}
@@ -607,6 +739,9 @@ def _render_review(job_id: str, job: dict, message: str = "") -> str:
 
 
 def _render_tarjeta_estado_test(info: dict | None) -> str:
+    """Tarjeta de monitoreo en vivo en /tests. Solo se llama mientras el
+    test esta realmente en curso (ver _obtener_estado_test_activo) - en
+    cuanto termina, deja de mostrarse solo, sin intervencion del usuario."""
     if not info:
         return ""
     jid = html.escape(str(info.get("job_id") or ""))
@@ -619,72 +754,48 @@ def _render_tarjeta_estado_test(info: dict | None) -> str:
     exit = int(info.get("exitosos") or 0)
     fall = int(info.get("fallidos") or 0)
 
-    if st == "en_ejecucion":
-        badge = f'<span class="badge warn" style="background:#fef0c7;color:#b54708;font-weight:700;">⏳ En proceso ({pct}%)</span>'
-        icono = "🔄"
-        borde_color = "#6366f1"
-        bg_color = "#fbfaff"
-    elif st == "esperando_asignatura":
-        badge = '<span class="badge warn" style="background:#fee2e2;color:#b91c1c;font-weight:700;">⚠️ Selección requerida</span>'
+    if st == "esperando_asignatura":
+        clase_card = "live-card--waiting"
+        badge = '<span class="badge-dinamico badge-dinamico--error">⚠️ Selección requerida</span>'
         icono = "⚠️"
-        borde_color = "#ef4444"
-        bg_color = "#fef2f2"
-    elif st == "completado":
-        badge = '<span class="badge ok" style="font-weight:700;">✓ Completado en PRIZMA</span>'
-        icono = "✅"
-        borde_color = "#10b981"
-        bg_color = "#f0fdf4"
-    elif st == "error":
-        badge = '<span class="badge error" style="font-weight:700;">❌ Error en carga</span>'
-        icono = "❌"
-        borde_color = "#ef4444"
-        bg_color = "#fef2f2"
-    elif st == "detenido":
-        badge = '<span class="badge" style="background:#e5e7eb;color:#374151;font-weight:700;">⏹ Detenido</span>'
-        icono = "⏹"
-        borde_color = "#9ca3af"
-        bg_color = "#f9fafb"
     else:
-        badge = f'<span class="badge">{html.escape(st)}</span>'
-        icono = "📄"
-        borde_color = "#e5e7eb"
-        bg_color = "#ffffff"
+        clase_card = "live-card--running"
+        badge = f'<span class="badge-dinamico badge-dinamico--proceso">⏳ En proceso ({pct}%)</span>'
+        icono = "🔄"
 
     asig_html = f' · Asignatura: <strong>{asignatura}</strong>' if asignatura else ''
 
     return f'''
-    <section id="card-estado-test-activo" class="panel" style="margin-bottom:24px;border:2px solid {borde_color};background:{bg_color};border-radius:16px;padding:20px 24px;box-shadow:0 4px 14px rgba(0,0,0,0.04);transition:all .3s ease;">
+    <section id="card-estado-test-activo" class="panel live-card {clase_card}">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:14px;margin-bottom:12px;">
             <div style="display:flex;gap:12px;align-items:center;">
                 <span style="font-size:26px;">{icono}</span>
                 <div>
                     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                        <h3 style="margin:0;font-size:16px;color:#1e293b;font-weight:800;">Cargue de Test en PRIZMA</h3>
+                        <h3>Cargue de Test en PRIZMA</h3>
                         <span id="card-badge-estado">{badge}</span>
                     </div>
-                    <p style="margin:3px 0 0;font-size:13px;color:#475467;">
-                        Documento: <strong>{titulo}</strong>{asig_html}
-                    </p>
+                    <p>Documento: <strong>{titulo}</strong>{asig_html}</p>
                 </div>
             </div>
-            <a href="/tests/{jid}/estado-prizma" class="boton" style="background:#5548e8;color:#fff;text-decoration:none;padding:10px 18px;border-radius:10px;font-size:13px;font-weight:700;display:inline-flex;align-items:center;gap:6px;box-shadow:0 2px 8px rgba(85,72,232,0.3);">
+            <a href="/tests/{jid}/estado-prizma" class="boton" style="text-decoration:none;padding:10px 18px;font-size:13px;">
                 ⚡ Ver monitor en vivo ➔
             </a>
         </div>
 
         <div style="margin:12px 0 8px;">
-            <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-bottom:5px;font-weight:600;">
-                <span id="card-txt-avance">{exit} de {total} tests guardados exitosamente</span>
+            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px;font-weight:600;">
+                <span id="card-txt-avance" class="muted">{exit} de {total} tests guardados exitosamente</span>
                 <span id="card-txt-pct" style="color:#5548e8;font-weight:800;">{pct}%</span>
             </div>
-            <div style="background:#e2e8f0;border-radius:999px;height:9px;overflow:hidden;">
-                <div id="card-barra-progreso" style="background:linear-gradient(90deg,#5548e8,#818cf8);height:100%;width:{pct}%;transition:width .4s ease;"></div>
+            <div class="progress-track">
+                <div id="card-barra-progreso" class="progress-fill" style="width:{pct}%;"></div>
             </div>
         </div>
 
-        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#475467;margin-top:10px;flex-wrap:wrap;gap:8px;">
-            <span id="card-mensaje" style="font-style:italic;">💬 {mensaje}</span>
-            <span id="card-stats" style="font-weight:600;color:#64748b;">Exitosos: {exit} · Fallidos: {fall} · Total: {total}</span>
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;margin-top:10px;flex-wrap:wrap;gap:8px;">
+            <span id="card-mensaje" class="muted" style="font-style:italic;">💬 {mensaje}</span>
+            <span id="card-stats" class="muted" style="font-weight:600;">Exitosos: {exit} · Fallidos: {fall} · Total: {total}</span>
         </div>
     </section>
     '''
@@ -698,16 +809,16 @@ def tests_home(request: Request):
     tarjeta_activo = _render_tarjeta_estado_test(info_activo)
 
     if google_conectado:
-        alerta_google = '''<div style="margin-top:14px;background:#ecfdf3;border:1px solid #a6f4c5;border-radius:12px;padding:14px;display:flex;gap:12px;align-items:center;">
+        alerta_google = '''<div class="alert-soft alert-soft--ok">
             <span style="font-size:20px;">✓</span>
-            <span style="font-size:13px;color:#027a48;">Tu cuenta de Google está vinculada en esta sesión. Puedes ingresar enlaces privados o compartidos.</span>
+            <span style="font-size:13px;">Tu cuenta de Google está vinculada en esta sesión. Puedes ingresar enlaces privados o compartidos.</span>
         </div>'''
     else:
-        alerta_google = '''<div style="margin-top:14px;background:#fff8df;border:1px solid #f5c451;border-radius:12px;padding:14px;display:flex;gap:12px;align-items:flex-start;">
+        alerta_google = '''<div class="alert-soft alert-soft--warn">
             <span style="font-size:20px;">⚠️</span>
-            <div style="font-size:13px;color:#7a4b00;line-height:1.5;">
+            <div style="font-size:13px;line-height:1.5;">
                 <strong>¿Tu documento de Google Docs es privado?</strong><br>
-                <a href="/" style="color:#4f46e5;font-weight:700;text-decoration:underline;">Ve al inicio e inicia sesión con tu cuenta de Google</a> para autorizar la sincronización privada. Si el documento ya tiene acceso público con el enlace, puedes continuar directamente.
+                <a href="/" style="font-weight:700;text-decoration:underline;">Ve al inicio e inicia sesión con tu cuenta de Google</a> para autorizar la sincronización privada. Si el documento ya tiene acceso público con el enlace, puedes continuar directamente.
             </div>
         </div>'''
 
@@ -729,15 +840,15 @@ def tests_home(request: Request):
 
             <form id="form-analizar" action="/tests/analizar" method="post" enctype="multipart/form-data">
                 <div style="display:flex;gap:12px;margin-bottom:22px;flex-wrap:wrap;">
-                    <label id="lbl-modo-archivo" style="flex:1;min-width:180px;border:2px solid #5548e8;border-radius:12px;padding:14px;cursor:pointer;background:#f8f7ff;transition:all .2s;">
+                    <label id="lbl-modo-archivo" class="mode-option mode-option--activo">
                         <input type="radio" name="modo_entrada" value="archivo" checked style="accent-color:#5548e8;">
-                        <strong style="margin-left:7px;font-size:14px;">📄 Por archivo</strong>
-                        <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Sube un documento Word (.docx)</span>
+                        <strong>📄 Por archivo</strong>
+                        <span>Sube un documento Word (.docx)</span>
                     </label>
-                    <label id="lbl-modo-link" style="flex:1;min-width:180px;border:1px solid #e5e7ef;border-radius:12px;padding:14px;cursor:pointer;background:#fff;transition:all .2s;">
+                    <label id="lbl-modo-link" class="mode-option">
                         <input type="radio" name="modo_entrada" value="link" style="accent-color:#5548e8;">
-                        <strong style="margin-left:7px;font-size:14px;">🔗 Por link</strong>
-                        <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Google Docs (público o privado)</span>
+                        <strong>🔗 Por link</strong>
+                        <span>Google Docs (público o privado)</span>
                     </label>
                 </div>
 
@@ -745,15 +856,15 @@ def tests_home(request: Request):
                     <label class="dropzone" id="dropzone-box" for="archivo_docx">
                         <div id="dropzone-vacio">
                             <div style="font-size:36px;margin-bottom:8px;">📄</div>
-                            <strong style="font-size:15px;color:#101828;">Arrastra tu archivo Word aquí</strong>
+                            <strong style="font-size:15px;">Arrastra tu archivo Word aquí</strong>
                             <span class="muted" style="display:block;margin-top:4px;">o haz clic para buscarlo en tu equipo (.docx)</span>
                         </div>
                         <div id="dropzone-seleccionado" style="display:none;padding:10px 0;">
-                            <div style="font-size:36px;color:#087f5b;">✓</div>
-                            <strong id="nombre-archivo-seleccionado" style="font-size:15px;color:#101828;display:block;margin:6px 0 4px;"></strong>
+                            <div style="font-size:36px;color:var(--verde);">✓</div>
+                            <strong id="nombre-archivo-seleccionado" style="font-size:15px;display:block;margin:6px 0 4px;"></strong>
                             <span id="peso-archivo-seleccionado" class="badge ok" style="margin-bottom:8px;"></span>
                             <div style="margin-top:8px;">
-                                <span style="font-size:12px;color:#5548e8;text-decoration:underline;">Haz clic aquí para seleccionar otro archivo</span>
+                                <span style="font-size:12px;color:var(--morado);text-decoration:underline;">Haz clic aquí para seleccionar otro archivo</span>
                             </div>
                         </div>
                         <input id="archivo_docx" name="archivo_docx" type="file" accept=".docx" hidden>
@@ -807,10 +918,8 @@ def tests_home(request: Request):
         const esArchivo = radioArchivo.checked;
         bloqueArchivo.style.display = esArchivo ? '' : 'none';
         bloqueLink.style.display = esArchivo ? 'none' : '';
-        lblArchivo.style.borderColor = esArchivo ? '#5548e8' : '#e5e7ef';
-        lblArchivo.style.background = esArchivo ? '#f8f7ff' : '#fff';
-        lblLink.style.borderColor = !esArchivo ? '#5548e8' : '#e5e7ef';
-        lblLink.style.background = !esArchivo ? '#f8f7ff' : '#fff';
+        lblArchivo.classList.toggle('mode-option--activo', esArchivo);
+        lblLink.classList.toggle('mode-option--activo', !esArchivo);
     }}
 
     radioArchivo.addEventListener('change', actualizarModo);
@@ -868,7 +977,13 @@ def tests_home(request: Request):
                 fetch('/tests/estado-activo/json')
                     .then(r => r.json())
                     .then(data => {
-                        if (!data || !data.activo) return;
+                        if (!data || !data.activo) {
+                            // El test ya no esta activo (termino mientras
+                            // mirabamos): recargar para que la tarjeta
+                            // desaparezca sola, sin quedar congelada.
+                            setTimeout(() => window.location.reload(), 1200);
+                            return;
+                        }
                         const elPct = document.getElementById('card-txt-pct');
                         const elBar = document.getElementById('card-barra-progreso');
                         const elMsg = document.getElementById('card-mensaje');
@@ -1062,6 +1177,8 @@ def ejecutar_test_job(
     on_test_callback=None,
     on_log_callback=None,
     cancel_checker=None,
+    ruta_reporte: str | None = None,
+    registrar_historial: bool = False,
 ) -> dict:
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
@@ -1157,6 +1274,25 @@ def ejecutar_test_job(
             raise ValueError("Tiempo de espera agotado (5 min) para seleccionar la asignatura en PRIZMA.")
         return sync_obj["seleccion"]["asignatura"]
 
+    def _fila_test_reporte(indice, item, resultado, error_msg=""):
+        if not ruta_reporte:
+            return
+        t = document.tests[indice - 1] if 0 < indice <= len(document.tests) else None
+        actividad = {
+            "fila_excel": f"Test {indice}",
+            "programa": cascada.get("programa") or "",
+            "curso": cascada.get("asignatura") or "",
+            "semana": (getattr(t, "week", "") or cascada.get("nivel") or "") if t else "",
+            "unidad": (getattr(t, "cut", "") or "") if t else "",
+            "nombre": item.get("titulo") or f"Test {indice}",
+            "categoria_prizma": "Test Evaluativo",
+            "tipo_archivo": "Test",
+        }
+        try:
+            motor_prizma.guardar_resultado(ruta_reporte, actividad, resultado, error_msg)
+        except Exception:
+            pass
+
     def on_test_progreso(indice: int, estado_test: str, msg_test: str, err: str = ""):
         with _AUTOMATION_LOCK:
             if 1 <= indice <= len(auto_state["detalle_tests"]):
@@ -1167,12 +1303,15 @@ def ejecutar_test_job(
                 auto_state["exitosos"] += 1
                 auto_state["procesados"] += 1
                 auto_state["pendientes"] = max(0, auto_state["total"] - auto_state["procesados"])
+                _fila_test_reporte(indice, item, "Cargado")
             elif estado_test == "error":
                 auto_state["fallidos"] += 1
                 auto_state["procesados"] += 1
                 auto_state["pendientes"] = max(0, auto_state["total"] - auto_state["procesados"])
+                _fila_test_reporte(indice, item, "Error", err or msg_test)
             elif estado_test == "cancelado":
                 auto_state["pendientes"] = max(0, auto_state["total"] - auto_state["procesados"])
+                _fila_test_reporte(indice, item, "Cancelado")
 
             total_t = max(1, auto_state["total"])
             auto_state["progreso_porcentaje"] = int((auto_state["procesados"] / total_t) * 100)
@@ -1189,9 +1328,19 @@ def ejecutar_test_job(
             return True
         return False
 
+    def _registrar_historial_si_aplica():
+        if not registrar_historial or not ruta_reporte:
+            return
+        estado_final = "finalizado" if auto_state["estado"] == "completado" else auto_state["estado"]
+        try:
+            from main import _registrar_historial_test
+            _registrar_historial_test(job_id, ruta_reporte, cascada, estado_final, auto_state.get("owner", ""))
+        except Exception:
+            pass
+
     try:
         automator = PrizmaTestAutomator(
-            base_url="https://admin.prizma.solutions",
+            base_url="https://admin.prizma.site",
             headless=headless,
             log_callback=on_log,
         )
@@ -1225,6 +1374,7 @@ def ejecutar_test_job(
                 raw_err = res.get("error", "Error desconocido en la automatización.")
                 auto_state["error"] = simplificar_mensaje_error(raw_err)
                 auto_state["mensaje"] = f"Fallo en la ejecución: {auto_state['error']}"
+        _registrar_historial_si_aplica()
         return res
     except Exception as e:
         with _AUTOMATION_LOCK:
@@ -1236,6 +1386,7 @@ def ejecutar_test_job(
                 auto_state["estado"] = "error"
                 auto_state["error"] = simplificar_mensaje_error(e)
                 auto_state["mensaje"] = f"Excepción en ejecución: {auto_state['error']}"
+        _registrar_historial_si_aplica()
         return {"ok": False, "error": str(e)}
 
 
@@ -1282,6 +1433,11 @@ async def ejecutar_prizma(
         "corte": cascada_corte.strip(),
     }
 
+    ruta_reporte_test = None
+    if not simulacion:
+        from main import _ruta_reporte_test
+        ruta_reporte_test = _ruta_reporte_test(cascada, job_id)
+
     threading.Thread(
         target=ejecutar_test_job,
         kwargs={
@@ -1292,6 +1448,8 @@ async def ejecutar_prizma(
             "simulacion": simulacion,
             "headless": headless,
             "cascada_override": cascada,
+            "ruta_reporte": ruta_reporte_test,
+            "registrar_historial": bool(ruta_reporte_test),
         },
         daemon=True,
     ).start()
@@ -1317,8 +1475,7 @@ def status_prizma(request: Request, job_id: str):
     rows_tests = []
     for item in auto_state.get("detalle_tests", []):
         st = item.get("estado", "pendiente")
-        badge_cls = "ok" if st == "exitoso" else "error" if st == "error" else "warn" if st == "en_proceso" else ""
-        badge_style = "background:#f2f4f7;color:#344054;" if st == "pendiente" else ""
+        badge_mod = "ok" if st == "exitoso" else "error" if st == "error" else "proceso" if st == "en_proceso" else "pendiente"
         badge_txt = (
             "✓ Guardado"
             if (st == "exitoso" and not es_sim)
@@ -1331,18 +1488,18 @@ def status_prizma(request: Request, job_id: str):
             else "⚪ En espera"
         )
         rows_tests.append(
-            f'<tr id="row-test-{item["numero"]}" style="border-bottom:1px solid #f2f4f7;">'
+            f'<tr id="row-test-{item["numero"]}" style="border-bottom:1px solid var(--borde);">'
             f'<td style="padding:10px 8px;font-weight:700;">{item["numero"]}</td>'
             f'<td style="padding:10px 8px;"><strong>{html.escape(item["titulo"])}</strong></td>'
-            f'<td style="padding:10px 8px;"><span class="badge" style="background:#f9f5ff;color:#6941c6;">{item["preguntas"]} preg.</span></td>'
-            f'<td style="padding:10px 8px;"><span class="badge {badge_cls}" style="{badge_style}" id="badge-test-{item["numero"]}">{badge_txt}</span></td>'
-            f'<td style="padding:10px 8px;color:#475467;font-size:12px;" id="msg-test-{item["numero"]}">{html.escape(item["mensaje"])}</td>'
+            f'<td style="padding:10px 8px;"><span class="chip-morado">{item["preguntas"]} preg.</span></td>'
+            f'<td style="padding:10px 8px;"><span class="badge-dinamico badge-dinamico--{badge_mod}" id="badge-test-{item["numero"]}">{badge_txt}</span></td>'
+            f'<td class="muted" style="padding:10px 8px;font-size:12px;" id="msg-test-{item["numero"]}">{html.escape(item["mensaje"])}</td>'
             f'</tr>'
         )
     filas_html = "".join(rows_tests)
 
-    body = f'''<h1>{'Monitoreo de Simulación en PRIZMA' if es_sim else 'Monitoreo de Creación en PRIZMA Solutions'}</h1>
-    <p>Visualización y auditoría en tiempo real de cada test en <strong>admin.prizma.solutions</strong>.</p>
+    body = f'''<h1>{'Monitoreo de Simulación en PRIZMA' if es_sim else 'Monitoreo de Creación en PRIZMA'}</h1>
+    <p>Visualización y auditoría en tiempo real de cada test en <strong>admin.prizma.site</strong>.</p>
     <div class="pasos">
         <span class="paso">1 Entrada ✓</span>
         <span class="paso">2 Revisión ✓</span>
@@ -1351,58 +1508,52 @@ def status_prizma(request: Request, job_id: str):
     </div>
 
     <!-- BANNER DE ERROR SUPERIOR DESTACADO -->
-    <div id="banner-error-superior" style="display:{'block' if auto_state.get('estado') == 'error' else 'none'};margin-bottom:20px;background:#fffbfa;border:2px solid #fecdca;border-radius:14px;padding:20px;box-shadow:0 4px 12px rgba(217,45,32,0.1);">
-        <div style="display:flex;gap:14px;align-items:flex-start;">
-            <div style="width:40px;height:40px;border-radius:50%;background:#fee4e2;color:#d92d20;display:grid;place-items:center;font-size:22px;font-weight:900;flex-shrink:0;">✕</div>
-            <div style="flex:1;">
-                <h3 style="margin:0 0 6px;color:#b42318;font-size:17px;font-weight:800;">La ejecución se detuvo por un error</h3>
-                <p id="texto-error-superior" style="margin:0 0 12px;color:#7a271a;font-size:14px;line-height:1.5;">{html.escape(auto_state.get('error') or auto_state.get('mensaje') or '')}</p>
-                <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                    <a class="boton secundario" href="/tests/{job_id}/revision" style="padding:9px 16px;font-size:13px;border-color:#fda29b;color:#b42318;background:#fff;">← Volver a Revisión para corregir parámetros</a>
-                </div>
+    <div id="banner-error-superior" class="status-banner status-banner--error" style="display:{'flex' if auto_state.get('estado') == 'error' else 'none'};">
+        <div class="status-icon">✕</div>
+        <div style="flex:1;">
+            <h3>La ejecución se detuvo por un error</h3>
+            <p id="texto-error-superior">{html.escape(auto_state.get('error') or auto_state.get('mensaje') or '')}</p>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                <a class="boton secundario" href="/tests/{job_id}/revision" style="padding:9px 16px;font-size:13px;">← Volver a Revisión para corregir parámetros</a>
             </div>
         </div>
     </div>
 
     <!-- BANNER DE ÉXITO SUPERIOR -->
-    <div id="banner-exito-superior" style="display:{'block' if auto_state.get('estado') == 'completado' else 'none'};margin-bottom:20px;background:#f6fef9;border:2px solid #a6f4c5;border-radius:14px;padding:20px;box-shadow:0 4px 12px rgba(2,122,72,0.08);">
-        <div style="display:flex;gap:14px;align-items:flex-start;">
-            <div style="width:40px;height:40px;border-radius:50%;background:#d1fadf;color:#027a48;display:grid;place-items:center;font-size:22px;font-weight:900;flex-shrink:0;">✓</div>
-            <div style="flex:1;">
-                <h3 style="margin:0 0 6px;color:#027a48;font-size:17px;font-weight:800;">{'Simulación validada exitosamente' if es_sim else '¡Tests creados y guardados con éxito en PRIZMA!'}</h3>
-                <p id="texto-exito-superior" style="margin:0;color:#05603a;font-size:14px;line-height:1.5;">{html.escape(auto_state.get('mensaje', ''))}</p>
-            </div>
+    <div id="banner-exito-superior" class="status-banner status-banner--ok" style="display:{'flex' if auto_state.get('estado') == 'completado' else 'none'};">
+        <div class="status-icon">✓</div>
+        <div style="flex:1;">
+            <h3>{'Simulación validada exitosamente' if es_sim else '¡Tests creados y guardados con éxito en PRIZMA!'}</h3>
+            <p id="texto-exito-superior" style="margin:0;">{html.escape(auto_state.get('mensaje', ''))}</p>
         </div>
     </div>
 
     <!-- BANNER DE DETENCIÓN SUPERIOR -->
-    <div id="banner-detenido-superior" style="display:{'block' if auto_state.get('estado') == 'detenido' else 'none'};margin-bottom:20px;background:#fffcf5;border:2px solid #fedf89;border-radius:14px;padding:20px;box-shadow:0 4px 12px rgba(181,71,8,0.08);">
-        <div style="display:flex;gap:14px;align-items:flex-start;">
-            <div style="width:40px;height:40px;border-radius:50%;background:#fef0c7;color:#b54708;display:grid;place-items:center;font-size:22px;font-weight:900;flex-shrink:0;">⏹</div>
-            <div style="flex:1;">
-                <h3 style="margin:0 0 6px;color:#b54708;font-size:17px;font-weight:800;">Automatización detenida por el usuario</h3>
-                <p id="texto-detenido-superior" style="margin:0 0 12px;color:#7a3307;font-size:14px;line-height:1.5;">{html.escape(auto_state.get('mensaje', ''))}</p>
-                <div style="display:flex;gap:12px;flex-wrap:wrap;">
-                    <a class="boton secundario" href="/tests/{job_id}/revision" style="padding:9px 16px;font-size:13px;border-color:#fedf89;color:#b54708;background:#fff;">← Volver a Revisión</a>
-                </div>
+    <div id="banner-detenido-superior" class="status-banner status-banner--warn" style="display:{'flex' if auto_state.get('estado') == 'detenido' else 'none'};">
+        <div class="status-icon">⏹</div>
+        <div style="flex:1;">
+            <h3>Automatización detenida por el usuario</h3>
+            <p id="texto-detenido-superior">{html.escape(auto_state.get('mensaje', ''))}</p>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                <a class="boton secundario" href="/tests/{job_id}/revision" style="padding:9px 16px;font-size:13px;">← Volver a Revisión</a>
             </div>
         </div>
     </div>
 
     <!-- PANEL INTERACTIVO DE SELECCIÓN DE ASIGNATURA -->
-    <div id="panel-seleccion-asignatura" style="display:{'block' if auto_state.get('esperando_asignatura') else 'none'};margin-bottom:20px;background:#fffdf5;border:2px solid #f59e0b;border-radius:14px;padding:22px;box-shadow:0 6px 18px rgba(245,158,11,0.15);">
-        <div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:14px;">
-            <div style="width:42px;height:42px;border-radius:50%;background:#fef3c7;color:#b45309;display:grid;place-items:center;font-size:24px;flex-shrink:0;">⚠️</div>
+    <div id="panel-seleccion-asignatura" class="status-banner status-banner--warn" style="display:{'flex' if auto_state.get('esperando_asignatura') else 'none'};flex-direction:column;">
+        <div style="display:flex;gap:14px;align-items:flex-start;width:100%;">
+            <div class="status-icon">⚠️</div>
             <div style="flex:1;">
-                <h3 style="margin:0 0 6px;color:#92400e;font-size:17px;font-weight:800;">Selección de Asignatura Requerida</h3>
-                <p id="txt-asignatura-buscada" style="margin:0;color:#78350f;font-size:14px;line-height:1.5;">La asignatura ingresada no coincide exactamente con las opciones registradas en PRIZMA. Selecciona la opción correcta para que el robot continúe:</p>
+                <h3>Selección de Asignatura Requerida</h3>
+                <p id="txt-asignatura-buscada" style="margin:0;">La asignatura ingresada no coincide exactamente con las opciones registradas en PRIZMA. Selecciona la opción correcta para que el robot continúe:</p>
             </div>
         </div>
-        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;">
-            <select id="sel-asignatura-opciones" style="flex:1;min-width:280px;padding:12px 14px;border:1px solid #d5d1fc;border-radius:10px;font-size:14px;font-weight:600;color:#101828;background:#fff;">
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:14px;width:100%;">
+            <select id="sel-asignatura-opciones" style="flex:1;min-width:280px;">
                 <option value="">-- Seleccionar asignatura de PRIZMA --</option>
             </select>
-            <button id="btn-confirmar-asignatura" type="button" style="background:#d97706;color:#fff;border:0;border-radius:10px;padding:12px 22px;font-size:14px;font-weight:700;cursor:pointer;transition:all .2s;">
+            <button id="btn-confirmar-asignatura" type="button" style="background:#d97706;">
                 Confirmar Asignatura y Continuar ➔
             </button>
         </div>
@@ -1411,41 +1562,41 @@ def status_prizma(request: Request, job_id: str):
 
     <!-- TARJETAS KPI DE PROGRESO -->
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:14px;margin-bottom:20px;">
-        <div style="background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(16,24,40,.05);">
-            <div style="font-size:12px;font-weight:700;color:#667085;text-transform:uppercase;">Total Tests</div>
-            <div id="kpi-total" style="font-size:28px;font-weight:900;color:#101828;margin-top:4px;">{auto_state.get('total', 0)}</div>
+        <div class="kpi-card">
+            <div class="kpi-label">Total Tests</div>
+            <div id="kpi-total" class="kpi-valor">{auto_state.get('total', 0)}</div>
         </div>
-        <div style="background:#f6fef9;border:1px solid #a6f4c5;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(16,24,40,.05);">
-            <div style="font-size:12px;font-weight:700;color:#027a48;text-transform:uppercase;">{'✓ Validados' if es_sim else '✅ Guardados'}</div>
-            <div id="kpi-exitosos" style="font-size:28px;font-weight:900;color:#027a48;margin-top:4px;">{auto_state.get('exitosos', 0)}</div>
+        <div class="kpi-card kpi-card--ok">
+            <div class="kpi-label">{'✓ Validados' if es_sim else '✅ Guardados'}</div>
+            <div id="kpi-exitosos" class="kpi-valor">{auto_state.get('exitosos', 0)}</div>
         </div>
-        <div style="background:#fffcf5;border:1px solid #fedf89;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(16,24,40,.05);">
-            <div style="font-size:12px;font-weight:700;color:#b54708;text-transform:uppercase;">⏳ Faltantes / En Cola</div>
-            <div id="kpi-pendientes" style="font-size:28px;font-weight:900;color:#b54708;margin-top:4px;">{auto_state.get('pendientes', 0)}</div>
+        <div class="kpi-card kpi-card--warn">
+            <div class="kpi-label">⏳ Faltantes / En Cola</div>
+            <div id="kpi-pendientes" class="kpi-valor">{auto_state.get('pendientes', 0)}</div>
         </div>
-        <div style="background:#fffbfa;border:1px solid #fecdca;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(16,24,40,.05);">
-            <div style="font-size:12px;font-weight:700;color:#b42318;text-transform:uppercase;">❌ Con Errores</div>
-            <div id="kpi-fallidos" style="font-size:28px;font-weight:900;color:#b42318;margin-top:4px;">{auto_state.get('fallidos', 0)}</div>
+        <div class="kpi-card kpi-card--error">
+            <div class="kpi-label">❌ Con Errores</div>
+            <div id="kpi-fallidos" class="kpi-valor">{auto_state.get('fallidos', 0)}</div>
         </div>
     </div>
 
     <!-- BARRA DE PROGRESO VISUAL -->
-    <div style="background:#fff;border:1px solid var(--borde);border-radius:12px;padding:16px;margin-bottom:20px;">
+    <div class="panel">
         <div style="display:flex;justify-content:space-between;margin-bottom:8px;font-size:13px;font-weight:700;">
             <span id="progreso-texto-avance">Avance general ({auto_state.get('procesados', 0)} de {auto_state.get('total', 0)} tests)</span>
             <span id="progreso-porcentaje-texto">{auto_state.get('progreso_porcentaje', 0)}%</span>
         </div>
-        <div style="width:100%;height:10px;background:#eaecf0;border-radius:999px;overflow:hidden;">
-            <div id="progreso-barra-fill" style="width:{auto_state.get('progreso_porcentaje', 0)}%;height:100%;background:linear-gradient(90deg, #5548e8, #087f5b);border-radius:999px;transition:width .4s ease;"></div>
+        <div class="progress-track">
+            <div id="progreso-barra-fill" class="progress-fill" style="width:{auto_state.get('progreso_porcentaje', 0)}%;"></div>
         </div>
     </div>
 
     <!-- TABLA DE DETALLE POR TEST -->
-    <div style="background:#fff;border:1px solid var(--borde);border-radius:12px;padding:16px;margin-bottom:20px;overflow-x:auto;">
-        <h3 style="margin:0 0 12px;font-size:15px;color:#344054;">Detalle de Tests en Proceso:</h3>
+    <div class="panel" style="overflow-x:auto;">
+        <h3 style="margin:0 0 12px;font-size:15px;">Detalle de Tests en Proceso:</h3>
         <table style="width:100%;border-collapse:collapse;font-size:13px;text-align:left;">
             <thead>
-                <tr style="border-bottom:2px solid #eaecf0;color:#475467;">
+                <tr style="border-bottom:2px solid var(--borde);">
                     <th style="padding:10px 8px;width:50px;">#</th>
                     <th style="padding:10px 8px;">Título del Test</th>
                     <th style="padding:10px 8px;width:110px;">Preguntas</th>
@@ -1466,13 +1617,13 @@ def status_prizma(request: Request, job_id: str):
             </span>
             <span class="muted" id="estado-resumen">{auto_state.get('procesados', 0)} de {auto_state.get('total', 0)} test(s) procesados</span>
         </div>
-        <h3 id="estado-mensaje" style="margin:0 0 16px;color:#344054;">{html.escape(auto_state.get('mensaje', ''))}</h3>
+        <h3 id="estado-mensaje" style="margin:0 0 16px;">{html.escape(auto_state.get('mensaje', ''))}</h3>
 
         <div class="acciones" style="margin-top:24px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-            <button id="btn-detener-auto" type="button" class="boton secundario" onclick="detenerAutomatizacion()" style="border-color:#fda29b;color:#b42318;background:#fff;display:{'inline-flex' if auto_state.get('estado') == 'en_ejecucion' else 'none'};align-items:center;gap:6px;cursor:pointer;">⏹ Detener automatización</button>
+            <button id="btn-detener-auto" type="button" class="boton secundario peligro" onclick="detenerAutomatizacion()" style="display:{'inline-flex' if auto_state.get('estado') == 'en_ejecucion' else 'none'};align-items:center;gap:6px;cursor:pointer;">⏹ Detener automatización</button>
             <a class="boton secundario" href="/tests/{job_id}/revision">← Volver a Revisión</a>
             <a class="boton secundario" href="/tests">＋ Nuevo análisis</a>
-            <a class="boton" href="/" style="background:#027a48;">✓ Ir a Inicio</a>
+            <a class="boton" href="/" style="background:var(--verde);">✓ Ir a Inicio</a>
         </div>
     </section>
 
@@ -1509,29 +1660,19 @@ def status_prizma(request: Request, job_id: str):
             if (m && item.mensaje) m.textContent = item.mensaje;
             if (b) {{
                 if (item.estado === "exitoso") {{
-                    b.className = "badge ok";
-                    b.style.background = "";
-                    b.style.color = "";
+                    b.className = "badge-dinamico badge-dinamico--ok";
                     b.textContent = esSimulacion ? "✓ Validado" : "✓ Guardado";
                 }} else if (item.estado === "error") {{
-                    b.className = "badge error";
-                    b.style.background = "";
-                    b.style.color = "";
+                    b.className = "badge-dinamico badge-dinamico--error";
                     b.textContent = "❌ Error";
                 }} else if (item.estado === "cancelado") {{
-                    b.className = "badge";
-                    b.style.background = "#fef0c7";
-                    b.style.color = "#b54708";
+                    b.className = "badge-dinamico badge-dinamico--detenido";
                     b.textContent = "⏹ Detenido";
                 }} else if (item.estado === "en_proceso") {{
-                    b.className = "badge warn";
-                    b.style.background = "#fef0c7";
-                    b.style.color = "#b54708";
+                    b.className = "badge-dinamico badge-dinamico--proceso";
                     b.textContent = "⏳ En proceso...";
                 }} else {{
-                    b.className = "badge";
-                    b.style.background = "#f2f4f7";
-                    b.style.color = "#344054";
+                    b.className = "badge-dinamico badge-dinamico--pendiente";
                     b.textContent = "⚪ En espera";
                 }}
             }}
@@ -1573,7 +1714,7 @@ def status_prizma(request: Request, job_id: str):
                 const pnlAsig = document.getElementById("panel-seleccion-asignatura");
                 if (pnlAsig) {{
                     if (data.esperando_asignatura && data.opciones_asignatura && data.opciones_asignatura.length > 0) {{
-                        pnlAsig.style.display = "block";
+                        pnlAsig.style.display = "flex";
                         const txtBusq = document.getElementById("txt-asignatura-buscada");
                         if (txtBusq && data.asignatura_buscada) {{
                             txtBusq.textContent = `La asignatura "${{data.asignatura_buscada}}" no coincide exactamente en PRIZMA. Selecciona la opción correcta entre las ${{data.opciones_asignatura.length}} disponibles para continuar:`;
@@ -1591,12 +1732,10 @@ def status_prizma(request: Request, job_id: str):
                 const btnDet = document.getElementById("btn-detener-auto");
                 if (data.estado === "detenido") {{
                     badge.className = "badge warn";
-                    badge.style.background = "#fef0c7";
-                    badge.style.color = "#b54708";
                     badge.textContent = "⏹ Detenido por usuario";
                     const bDet = document.getElementById("banner-detenido-superior");
                     const txtDet = document.getElementById("texto-detenido-superior");
-                    if (bDet) bDet.style.display = "block";
+                    if (bDet) bDet.style.display = "flex";
                     if (txtDet && data.mensaje) txtDet.textContent = data.mensaje;
                     if (btnDet) btnDet.style.display = "none";
                     terminado = true;
@@ -1605,7 +1744,7 @@ def status_prizma(request: Request, job_id: str):
                     badge.textContent = data.simulacion ? "✓ Simulación exitosa (Validado sin guardar)" : "✓ Guardado completado en PRIZMA";
                     const bOk = document.getElementById("banner-exito-superior");
                     const txtOk = document.getElementById("texto-exito-superior");
-                    if (bOk) bOk.style.display = "block";
+                    if (bOk) bOk.style.display = "flex";
                     if (txtOk && data.mensaje) txtOk.textContent = data.mensaje;
                     if (btnDet) btnDet.style.display = "none";
                     terminado = true;
@@ -1614,7 +1753,7 @@ def status_prizma(request: Request, job_id: str):
                     badge.textContent = "❌ Error en la ejecución";
                     const bErr = document.getElementById("banner-error-superior");
                     const txtErr = document.getElementById("texto-error-superior");
-                    if (bErr) bErr.style.display = "block";
+                    if (bErr) bErr.style.display = "flex";
                     if (txtErr) txtErr.textContent = data.error || data.mensaje || "Error durante la automatización.";
                     if (btnDet) btnDet.style.display = "none";
                     if (bErr) bErr.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
@@ -1646,7 +1785,7 @@ def status_prizma(request: Request, job_id: str):
                 if (res.ok) {{
                     if (msgConf) {{
                         msgConf.style.display = "block";
-                        msgConf.style.color = "#027a48";
+                        msgConf.style.color = "var(--verde)";
                         msgConf.textContent = `✓ Selección enviada: "${{res.asignatura}}". El robot continuará procesando el test...`;
                     }}
                     btnConfAsig.textContent = "✓ Confirmado";
@@ -1763,8 +1902,10 @@ async def _extraer_bytes_docx_request(
 
 
 def _obtener_estado_test_activo(user: str = "") -> dict | None:
+    """Solo devuelve un job mientras esta realmente en curso. En cuanto
+    termina (exito o error) deja de aparecer aqui - el resultado se
+    consulta en Historial/Reportes, no hace falta "marcarlo como visto"."""
     with _AUTOMATION_LOCK:
-        # Prioridad 1: Cualquier trabajo en ejecución o esperando selección
         for jid, astate in reversed(list(_AUTOMATION_JOBS.items())):
             if user and astate.get("owner") and astate.get("owner") != user:
                 continue
@@ -1772,13 +1913,6 @@ def _obtener_estado_test_activo(user: str = "") -> dict | None:
                 res = dict(astate)
                 res["job_id"] = jid
                 return res
-        # Prioridad 2: El trabajo más reciente (completado, error, detenido)
-        for jid, astate in reversed(list(_AUTOMATION_JOBS.items())):
-            if user and astate.get("owner") and astate.get("owner") != user:
-                continue
-            res = dict(astate)
-            res["job_id"] = jid
-            return res
     return None
 
 

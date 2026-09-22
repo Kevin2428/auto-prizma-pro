@@ -2770,6 +2770,26 @@ def _nombre_reporte(cursos, trabajo_id):
     return f"{fecha} - resultado_prizma - {trabajo_id[:6]}.csv"
 
 
+def _ruta_reporte_test(cascada, test_job_id):
+    """Ruta del CSV de reporte para un Test Evaluativo ejecutado SOLO
+    (sin OVI/OVA/Retos), fuera de la cola de cargues normal."""
+    fecha = _ahora_colombia().strftime("%Y-%m-%d_%H-%M-%S")
+    asignatura = _sanitizar_parte_nombre((cascada or {}).get("asignatura") or "Test Evaluativo", 58)
+    nombre = f"{fecha} - {asignatura} - Test - {test_job_id[:6]}.csv"
+    return os.path.join(RESULTADOS_DIR, nombre)
+
+
+def _registrar_historial_test(test_job_id, ruta_reporte, cascada, estado_final, usuario_app):
+    """Registra en data/historial.json el resultado de un Test Evaluativo
+    ejecutado SOLO (flujo exclusivo, sin recursos OVI/OVA/Retos)."""
+    cascada = cascada or {}
+    cursos = [{
+        "curso": f"Test Evaluativo: {cascada.get('asignatura') or 'Sin asignatura'}",
+        "programa": cascada.get("programa") or "Programa sin nombre",
+    }]
+    return _agregar_registro_historial(test_job_id, ruta_reporte, cursos, estado_final, usuario_app, tipo="test")
+
+
 def _cargar_historial():
     if not os.path.isfile(HISTORIAL_PATH):
         return []
@@ -2789,29 +2809,43 @@ def _guardar_historial(registros):
     os.replace(temporal, HISTORIAL_PATH)
 
 
-def _registrar_reporte_final(trabajo):
-    ruta_reporte = trabajo.get("ruta_reporte")
+def _agregar_registro_historial(registro_id, ruta_reporte, cursos, estado_final, usuario_app, tipo=None):
+    """Escribe una fila en data/historial.json si no existe ya ese id.
+    Usado tanto por cargues de recursos (OVI/OVA/Retos) como por
+    tests evaluativos (combinados o exclusivos)."""
     if not ruta_reporte or not os.path.isfile(ruta_reporte):
-        return
+        return False
 
     with HISTORIAL_LOCK:
         registros = _cargar_historial()
-        trabajo_id = trabajo.get("id")
 
-        if any(r.get("id") == trabajo_id for r in registros):
-            trabajo["historial_registrado"] = True
-            return
+        if any(r.get("id") == registro_id for r in registros):
+            return False
 
-        fecha_iso = _ahora_colombia_iso()
-        registros.append({
-            "id": trabajo_id,
-            "fecha_iso": fecha_iso,
+        registro = {
+            "id": registro_id,
+            "fecha_iso": _ahora_colombia_iso(),
             "archivo_reporte": os.path.basename(ruta_reporte),
-            "cursos": trabajo.get("cursos", []),
-            "estado_final": trabajo.get("etapa", "finalizado"),
-            "usuario_app": trabajo.get("usuario_app"),
-        })
+            "cursos": cursos or [],
+            "estado_final": estado_final,
+            "usuario_app": usuario_app,
+        }
+        if tipo:
+            registro["tipo"] = tipo
+        registros.append(registro)
         _guardar_historial(registros)
+        return True
+
+
+def _registrar_reporte_final(trabajo):
+    escrito = _agregar_registro_historial(
+        trabajo.get("id"),
+        trabajo.get("ruta_reporte"),
+        trabajo.get("cursos", []),
+        trabajo.get("etapa", "finalizado"),
+        trabajo.get("usuario_app"),
+    )
+    if escrito or trabajo.get("historial_registrado"):
         trabajo["historial_registrado"] = True
 
 
@@ -2859,7 +2893,9 @@ def ejecutar_cargue_con_historial(
             USUARIO_ACTUAL.reset(testigo_usuario)
         except Exception:
             pass
-        _registrar_reporte_final(trabajo)
+        # El registro en historial se hace en _ejecutar_cargue_en_hilo,
+        # despues de que tambien corra (si aplica) el Test Evaluativo,
+        # para que el resultado del test quede reflejado.
 
 
 # ============================================================
@@ -2949,6 +2985,9 @@ def _ejecutar_test_en_cargue(trabajo, test_job_id, usuario, contrasena):
     if num_tests == 0:
         return
 
+    cascada_test = job_test.get("cascada_datos") or {}
+    ruta_reporte = trabajo.get("ruta_reporte")
+
     detalle = trabajo.setdefault("detalle_actividades", [])
     offset = len(detalle)
     for idx, t in enumerate(tests_list, start=1):
@@ -2965,6 +3004,28 @@ def _ejecutar_test_en_cargue(trabajo, test_job_id, usuario, contrasena):
     trabajo["etapa"] = "cargando_test"
     trabajo["mensaje"] = f"Iniciando cargue del Test Evaluativo en PRIZMA ({num_tests} examen{'es' if num_tests > 1 else ''})..."
 
+    def _fila_test_reporte(indice, item, resultado):
+        t = tests_list[indice - 1] if 0 < indice <= len(tests_list) else None
+        actividad = {
+            "fila_excel": f"Test {indice}",
+            "programa": cascada_test.get("programa") or "",
+            "curso": cascada_test.get("asignatura") or "",
+            "semana": (getattr(t, "week", "") or cascada_test.get("nivel") or "") if t else "",
+            "unidad": (getattr(t, "cut", "") or "") if t else "",
+            "nombre": item["nombre"],
+            "categoria_prizma": "Test Evaluativo",
+            "tipo_archivo": "Test",
+        }
+        try:
+            motor_prizma_modulo.guardar_resultado(
+                ruta_reporte,
+                actividad,
+                resultado,
+                item.get("error") or "",
+            )
+        except Exception:
+            pass
+
     def on_test(indice, estado_test, msg_test, err=""):
         item_idx = offset + indice - 1
         if 0 <= item_idx < len(trabajo["detalle_actividades"]):
@@ -2977,15 +3038,21 @@ def _ejecutar_test_en_cargue(trabajo, test_job_id, usuario, contrasena):
                 trabajo["procesadas"] = (trabajo.get("procesadas") or 0) + 1
                 trabajo["exitosas"] = (trabajo.get("exitosas") or 0) + 1
                 trabajo["mensaje"] = f"{item['nombre']} guardado con éxito."
+                if ruta_reporte:
+                    _fila_test_reporte(indice, item, "Cargado")
             elif estado_test == "error":
                 item["estado"] = "error"
                 item["error"] = err or msg_test
                 trabajo["procesadas"] = (trabajo.get("procesadas") or 0) + 1
                 trabajo["errores"] = (trabajo.get("errores") or 0) + 1
                 trabajo["mensaje"] = f"Error en {item['nombre']}: {item['error']}"
+                if ruta_reporte:
+                    _fila_test_reporte(indice, item, "Error")
             elif estado_test == "cancelado":
                 item["estado"] = "error"
                 item["error"] = "Detenido por usuario"
+                if ruta_reporte:
+                    _fila_test_reporte(indice, item, "Cancelado")
 
     def on_log(nivel, msg, snap=None):
         if nivel in ["error", "warn"]:
@@ -3004,10 +3071,14 @@ def _ejecutar_test_en_cargue(trabajo, test_job_id, usuario, contrasena):
     )
 
     trabajo["terminado"] = True
-    trabajo["etapa"] = "finalizado"
     ex = trabajo.get("exitosas", 0)
     er = trabajo.get("errores", 0)
-    trabajo["mensaje"] = f"Cargue completo finalizado. Exitosas: {ex}. Errores: {er}."
+    if not res.get("ok"):
+        trabajo["etapa"] = "error"
+        trabajo["mensaje"] = f"Error en el cargue del Test Evaluativo: {res.get('error', 'Error desconocido.')}"
+    else:
+        trabajo["etapa"] = "finalizado"
+        trabajo["mensaje"] = f"Cargue completo finalizado. Exitosas: {ex}. Errores: {er}."
 
 
 def _ejecutar_cargue_en_hilo(trabajo_id):
@@ -3073,6 +3144,7 @@ def _ejecutar_cargue_en_hilo(trabajo_id):
         trabajo.pop("usuario_prizma_temporal", None)
         trabajo.pop("contrasena_prizma_temporal", None)
         trabajo["finalizado_en"] = _ahora_colombia_iso()
+        _registrar_reporte_final(trabajo)
 
         with COLA_CONDICION:
             CARGUES_ACTIVOS -= 1
@@ -3771,12 +3843,12 @@ def generar_html(
             class="panel panel-principal"
         >
             <div class="selector-modo-matriz" style="display:flex;gap:10px;margin-bottom:22px;flex-wrap:wrap;">
-                <label style="flex:1;min-width:180px;border:1px solid #d8d5ff;border-radius:12px;padding:12px 14px;cursor:pointer;background:#f8f7ff;">
+                <label style="flex:1;min-width:180px;border-radius:12px;padding:12px 14px;cursor:pointer;">
                     <input type="radio" name="modo_matriz" value="link" checked>
                     <strong style="margin-left:7px;">🔗 Por link</strong>
                     <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Google Sheets + ZIP</span>
                 </label>
-                <label style="flex:1;min-width:180px;border:1px solid #e5e7ef;border-radius:12px;padding:12px 14px;cursor:pointer;">
+                <label style="flex:1;min-width:180px;border-radius:12px;padding:12px 14px;cursor:pointer;">
                     <input type="radio" name="modo_matriz" value="archivo">
                     <strong style="margin-left:7px;">📄 Por archivo</strong>
                     <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">XLSX/CSV + ZIP</span>
@@ -3924,12 +3996,12 @@ def generar_html(
                 </div>
 
                 <div class="selector-modo-matriz" style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
-                    <label style="flex:1;min-width:180px;border:1px solid #fde68a;border-radius:12px;padding:12px 14px;cursor:pointer;background:#fffdf5;">
+                    <label style="flex:1;min-width:180px;border-radius:12px;padding:12px 14px;cursor:pointer;">
                         <input type="radio" name="modo_test" value="archivo" checked>
                         <strong style="margin-left:7px;">📄 Por archivo Word</strong>
                         <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Documento .docx</span>
                     </label>
-                    <label style="flex:1;min-width:180px;border:1px solid #e5e7ef;border-radius:12px;padding:12px 14px;cursor:pointer;">
+                    <label style="flex:1;min-width:180px;border-radius:12px;padding:12px 14px;cursor:pointer;">
                         <input type="radio" name="modo_test" value="link">
                         <strong style="margin-left:7px;">🔗 Por link Google Docs</strong>
                         <span style="display:block;margin:5px 0 0 25px;color:#667085;font-size:12px;">Enlace del examen</span>
@@ -3939,7 +4011,7 @@ def generar_html(
                 <div class="grid-archivos" style="grid-template-columns:1fr;margin-bottom:18px;">
                     <label class="tarjeta-archivo zona-drop" id="bloque-test-archivo" for="archivo-test-docx" data-input="archivo-test-docx">
                         <div class="archivo-cabecera">
-                            <div class="archivo-icono" style="background:#fef3c7;color:#d97706;" aria-hidden="true">
+                            <div class="archivo-icono naranja" aria-hidden="true">
                                 <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
                             </div>
                             <div>
@@ -3956,7 +4028,7 @@ def generar_html(
 
                     <div class="tarjeta-archivo" id="bloque-test-link" style="display:none;">
                         <div class="archivo-cabecera">
-                            <div class="archivo-icono" style="background:#fef3c7;color:#d97706;" aria-hidden="true">
+                            <div class="archivo-icono naranja" aria-hidden="true">
                                 <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                             </div>
                             <div>
@@ -3970,7 +4042,7 @@ def generar_html(
                     </div>
                 </div>
 
-                <div style="background:#f8f9fc;border:1px solid #eaecf0;border-radius:12px;padding:16px;margin-bottom:18px;">
+                <div class="caja-datos-academicos" style="border-radius:12px;padding:16px;margin-bottom:18px;">
                     <div style="margin-bottom:14px;">
                         <label for="test-datos-academicos" style="font-weight:700;font-size:14px;color:#344054;margin-bottom:6px;display:block;">
                             Datos académicos (Código Programa · Código Pensum · Código Asignatura · Nombre Asignatura)
@@ -4325,7 +4397,7 @@ def generar_html(
             bloque_test_html = f"""
             <div class="panel" style="margin-bottom:20px;border:2px solid #f59e0b;background:#fffdf5;border-radius:16px;padding:22px;">
                 <div style="display:flex;gap:14px;align-items:flex-start;">
-                    <div style="width:44px;height:44px;border-radius:12px;background:#fef3c7;color:#d97706;display:grid;place-items:center;font-size:24px;flex-shrink:0;">📝</div>
+                    <div class="archivo-icono naranja" style="width:44px;height:44px;border-radius:12px;font-size:24px;">📝</div>
                     <div style="flex:1;">
                         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
                             <div>
@@ -4709,6 +4781,18 @@ def generar_html(
             .archivo-icono svg { width: 23px; height: 23px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
             .archivo-icono.verde { background: #e8f8f0; color: #0a9b5b; }
             .archivo-icono.morado { background: #f0edff; color: #5b48e8; }
+            .archivo-icono.naranja { background: #fef3c7; color: #d97706; }
+            .selector-modo-matriz label {
+                border: 1px solid #e5e7ef;
+                transition: .15s ease;
+            }
+            .selector-modo-matriz label:has(input:checked) {
+                border-color: #d8d5ff; background: #f8f7ff;
+            }
+            #bloque-test .selector-modo-matriz label:has(input:checked) {
+                border-color: #fde68a; background: #fffdf5;
+            }
+            .caja-datos-academicos { background: #f8f9fc; border: 1px solid #eaecf0; }
             .selector-archivo {
                 margin-top: 18px; min-height: 46px; border: 1px solid var(--borde); border-radius: 10px;
                 padding: 9px 12px; display: flex; align-items: center; gap: 12px;
@@ -5227,7 +5311,19 @@ img, svg, video { max-width: 100%; height: auto; }
     flex: 0 0 auto;
   }
 
-  .sidebar .estado-servicio { display: none !important; }
+  /* Version compacta: se ve el punto + "Servicio activo", sin los
+     chips de Navegador/Conexion, para que quepa en la barra superior
+     en vez de desaparecer del todo. */
+  .sidebar .estado-servicio {
+    margin-top: 0 !important;
+    margin-left: auto !important;
+    border: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    flex: 0 0 auto;
+  }
+  .sidebar .estado-servicio .servicio-linea { margin-bottom: 0 !important; white-space: nowrap; }
+  .sidebar .estado-servicio .servicio-mini { display: none !important; }
 
   .contenido { padding: 18px 16px 32px !important; }
 
@@ -5416,6 +5512,7 @@ html[data-theme="dark"] .encabezado-pagina,
 html[data-theme="dark"] .selector-modo-matriz label,
 html[data-theme="dark"] .tarjeta-archivo,
 html[data-theme="dark"] .tarjeta-tipo,
+html[data-theme="dark"] .caja-datos-academicos,
 html[data-theme="dark"] .selector-archivo {
   background: #111827 !important;
   color: #e5e7eb !important;
@@ -5431,12 +5528,21 @@ html[data-theme="dark"] .tarjeta-tipo:hover {
 }
 html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-verde,
 html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-azul,
-html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-morado {
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-morado,
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-naranja {
   background: #172033 !important;
 }
 html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-verde { border-color: #2fbf7f !important; }
 html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-azul { border-color: #4b9ee8 !important; }
 html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-morado { border-color: #8b7cf6 !important; }
+html[data-theme="dark"] .tarjeta-tipo:has(input:checked).tipo-naranja { border-color: #f0a83c !important; }
+html[data-theme="dark"] .selector-modo-matriz label:has(input:checked) {
+  background: #172033 !important;
+  border-color: #6d5dfc !important;
+}
+html[data-theme="dark"] #bloque-test .selector-modo-matriz label:has(input:checked) {
+  border-color: #f0a83c !important;
+}
 html[data-theme="dark"] .archivo-cabecera strong,
 html[data-theme="dark"] .tarjeta-tipo strong {
   color: #f8fafc !important;
@@ -6761,7 +6867,7 @@ def cargue_actual():
     activos = [
         trabajo for trabajo in TRABAJOS.values()
         if not trabajo.get("terminado")
-        and trabajo.get("etapa") in {"en_cola", "iniciando", "login", "preparando", "procesando", "validando_login"}
+        and trabajo.get("etapa") in {"en_cola", "iniciando", "login", "preparando", "procesando", "validando_login", "cargando_test"}
     ]
     activos.sort(key=lambda item: item.get("encolado_en") or item.get("iniciado_en") or item.get("creado_en", ""))
     if not activos:
@@ -7203,6 +7309,11 @@ background:linear-gradient(145deg,#6d5dfc,#4338ca)}}
 display:flex;gap:11px;align-items:center;text-decoration:none}}
 .nav-item:hover{{background:#f7f5ff;color:#4f46e5}}
 .nav-item.activo{{background:#f1efff;color:#4f46e5;font-weight:700}}
+.estado-servicio{{margin-top:auto;border:1px solid var(--borde);border-radius:14px;padding:15px}}
+.servicio-linea{{font-size:12px;font-weight:800;color:#07894f;margin-bottom:14px}}
+.punto{{width:8px;height:8px;background:#12b76a;border-radius:50%;display:inline-block;margin-right:7px}}
+.servicio-mini{{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted);margin-top:10px}}
+.chip{{background:#eef2ff;color:#4f46e5;border-radius:999px;padding:4px 8px}}
 .contenido{{padding:30px 34px 44px;min-width:0}}
 .panel{{background:#fff;border:1px solid var(--borde);border-radius:18px;
 box-shadow:0 10px 30px rgba(29,41,57,.05);overflow:hidden}}
@@ -7226,12 +7337,14 @@ tbody tr:hover{{background:#fafaff}}
   </div>
   <nav class="nav">
     <a class="nav-item" href="/">⌂ <span>Inicio</span></a>
+    <a class="nav-item" href="/tests">▣ <span>Test</span></a>
     <a class="nav-item" href="/cargue-actual">⇧ <span>Cargue actual</span></a>
     <a class="nav-item" href="/historial">◷ <span>Historial</span></a>
     <a class="nav-item activo" href="/reportes">▥ <span>Reportes</span></a>
     <a class="nav-item" href="/cambiar-clave">✎ <span>Mi contraseña</span></a>
     <a class="nav-item" href="/salir">⏻ <span>Salir</span></a>
   </nav>
+  <div class="estado-servicio"><div class="servicio-linea"><span class="punto"></span> Servicio activo</div><div class="servicio-mini"><span>Navegador</span><span class="chip">Chromium</span></div><div class="servicio-mini"><span>Conexión</span><span class="chip">Estable</span></div></div>
 </aside>
 <main class="contenido">
   <section class="cabecera">
