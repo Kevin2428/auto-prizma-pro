@@ -1272,7 +1272,15 @@ def ejecutar_test_job(
             auto_state["opciones_asignatura"] = []
         if not notificado or not sync_obj["seleccion"].get("asignatura"):
             raise ValueError("Tiempo de espera agotado (5 min) para seleccionar la asignatura en PRIZMA.")
-        return sync_obj["seleccion"]["asignatura"]
+
+        asignatura_confirmada = str(sync_obj["seleccion"]["asignatura"] or "").strip()
+        with _AUTOMATION_LOCK:
+            cascada["asignatura"] = asignatura_confirmada
+            auto_state["asignatura"] = asignatura_confirmada
+        with _JOBS_LOCK:
+            job["cascada_datos"] = dict(cascada)
+        sync_obj["seleccion"]["asignatura"] = None
+        return asignatura_confirmada
 
     def _fila_test_reporte(indice, item, resultado, error_msg=""):
         if not ruta_reporte:
