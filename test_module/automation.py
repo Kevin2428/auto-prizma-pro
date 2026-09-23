@@ -44,6 +44,51 @@ for _num, _vars in MAPA_NUMEROS_TEXTO.items():
         VARIANTES_A_NUM[_v] = _num
 
 
+
+
+EQUIVALENCIAS_PROGRAMAS = (
+    (
+        "Administración de Empresas",
+        "Tecnología en Gestión Empresarial",
+    ),
+    (
+        "Administración Turística y Hotelera",
+        "Tecnología en Gestión Turística y Hoteles",
+    ),
+    (
+        "Contaduría Pública",
+        "Técnica Profesional en Procesos Contables",
+    ),
+    (
+        "Negocios Internacionales",
+        "Técnica Virtual Profesional en Procesos Logísticos y de Comercio Exterior",
+        "Técnica Vistural Profesional en Procesos Logísticos y de Comercio Exterior",
+    ),
+)
+
+
+def resolver_variantes_programa(texto: str | None) -> list[str]:
+    """Devuelve aliases explícitos y bidireccionales para el selector Programa.
+
+    No aplica fuzzy matching general: si el programa no pertenece a un grupo
+    conocido, conserva exactamente el valor recibido.
+    """
+    valor = str(texto or "").strip()
+    if not valor:
+        return []
+
+    valor_n = normalizar_texto(valor)
+    for grupo in EQUIVALENCIAS_PROGRAMAS:
+        grupo_n = {normalizar_texto(item) for item in grupo}
+        if valor_n in grupo_n:
+            variantes = [valor]
+            for item in grupo:
+                if normalizar_texto(item) != valor_n:
+                    variantes.append(item)
+            return variantes
+
+    return [valor]
+
 def resolver_variantes_numericas(texto: str | None) -> list[str]:
     """
     Retorna una lista de variantes numéricas, textuales y ordinales equivalentes
@@ -295,6 +340,12 @@ class PrizmaTestAutomator:
         valor_limpio = str(valor).strip()
         valor_n = normalizar_texto(valor_limpio)
         variantes_num = resolver_variantes_numericas(valor_limpio)
+        variantes_programa = (
+            resolver_variantes_programa(valor_limpio)
+            if normalizar_texto(placeholder) == "programa"
+            else [valor_limpio]
+        )
+        variantes_programa_n = [normalizar_texto(v) for v in variantes_programa if normalizar_texto(v)]
         self._log(f"Configurando campo '{placeholder}' con valor '{valor_limpio}'...", "info")
 
         campo = self.localizar_campo_formulario(page, placeholder, timeout_ms=12000)
@@ -309,7 +360,11 @@ class PrizmaTestAutomator:
 
         try:
             val_actual = normalizar_texto(campo.input_value())
-            if val_actual == valor_n or (len(valor_n) >= 3 and valor_n in val_actual):
+            if any(
+                val_actual == variante
+                or (len(variante) >= 3 and variante in val_actual)
+                for variante in variantes_programa_n
+            ):
                 return True
             if any(val_actual == v or (len(v) >= 3 and v in val_actual) for v in variantes_num):
                 return True
@@ -323,7 +378,9 @@ class PrizmaTestAutomator:
 
                 # Si es intento posterior y tenemos variantes numéricas, podemos alternar entre texto y número
                 texto_a_escribir = valor_limpio
-                if intento == 2 and len(variantes_num) > 1:
+                if normalizar_texto(placeholder) == "programa" and len(variantes_programa) > 1:
+                    texto_a_escribir = variantes_programa[min(intento - 1, len(variantes_programa) - 1)]
+                elif intento == 2 and len(variantes_num) > 1:
                     texto_a_escribir = variantes_num[1] if variantes_num[0] == valor_n else variantes_num[0]
 
                 # Escribimos el código o nombre para que Material UI filtre en vivo
@@ -363,7 +420,7 @@ class PrizmaTestAutomator:
 
                     is_code_user = bool(re.search(r"\b([A-Z]{2,}\s*[\-_]?\s*\d+|\d{3,})\b", valor_limpio, re.I))
 
-                    if txt == valor_n:
+                    if txt in variantes_programa_n:
                         coincidencias_exactas.append((opc, txt_raw))
                         break
 
@@ -373,7 +430,7 @@ class PrizmaTestAutomator:
 
                     if is_code_user and re.search(rf"\b{re.escape(valor_n)}\b", txt):
                         coincidencias_codigo.append((opc, txt_raw))
-                    elif valor_n in txt:
+                    elif any(variante and variante in txt for variante in variantes_programa_n):
                         coincidencias_parciales.append((opc, txt_raw))
 
                 if coincidencias_exactas:
